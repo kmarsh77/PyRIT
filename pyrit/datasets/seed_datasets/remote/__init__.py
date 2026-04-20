@@ -19,6 +19,9 @@ from pyrit.datasets.seed_datasets.remote.babelscape_alert_dataset import (
 from pyrit.datasets.seed_datasets.remote.beaver_tails_dataset import (
     _BeaverTailsDataset,
 )  # noqa: F401
+from pyrit.datasets.seed_datasets.remote.cbt_bench_dataset import (
+    _CBTBenchDataset,
+)  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.ccp_sensitive_prompts_dataset import (
     _CCPSensitivePromptsDataset,
 )  # noqa: F401
@@ -98,6 +101,11 @@ from pyrit.datasets.seed_datasets.remote.toxic_chat_dataset import (
 from pyrit.datasets.seed_datasets.remote.transphobia_awareness_dataset import (  # noqa: F401
     _TransphobiaAwarenessDataset,
 )
+from pyrit.datasets.seed_datasets.remote.visual_leak_bench_dataset import (
+    VisualLeakBenchCategory,
+    VisualLeakBenchPIIType,
+    _VisualLeakBenchDataset,
+)  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.vlsu_multimodal_dataset import (
     _VLSUMultimodalDataset,
 )  # noqa: F401
@@ -112,6 +120,7 @@ __all__ = [
     "_AyaRedteamingDataset",
     "_BabelscapeAlertDataset",
     "_BeaverTailsDataset",
+    "_CBTBenchDataset",
     "_CCPSensitivePromptsDataset",
     "_DarkBenchDataset",
     "_EquityMedQADataset",
@@ -140,5 +149,8 @@ __all__ = [
     "_ToxicChatDataset",
     "_TransphobiaAwarenessDataset",
     "_VLSUMultimodalDataset",
+    "_VisualLeakBenchDataset",
+    "VisualLeakBenchCategory",
+    "VisualLeakBenchPIIType",
     "_XSTestDataset",
 ]

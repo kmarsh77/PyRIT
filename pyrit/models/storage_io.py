@@ -192,6 +192,7 @@ class AzureBlobStorageIO(StorageIO):
         AZURE_STORAGE_ACCOUNT_SAS_TOKEN environment variable or the init sas_token parameter, it will be used
         for authentication. Otherwise, a delegation SAS token will be created using Entra ID authentication.
         """
+        sas_token = self._sas_token
         if not self._sas_token:
             logger.info("SAS token not provided. Creating a delegation SAS token using Entra ID authentication.")
             sas_token = await AzureStorageAuth.get_sas_token(self._container_url)
@@ -254,6 +255,32 @@ class AzureBlobStorageIO(StorageIO):
             return container_name, blob_name
         raise ValueError("Invalid blob URL")
 
+    def _resolve_blob_name(self, path: Union[Path, str]) -> str:
+        """
+        Resolve a blob name from either a full blob URL or a relative blob path.
+
+        When a full URL is provided the blob name is extracted from it. The container
+        name embedded in the URL is intentionally discarded — operations always run
+        against the container configured in the constructor.
+
+        Backslashes are normalized to forward slashes so that ``Path`` objects
+        created on Windows still produce valid blob names.
+
+        Args:
+            path (Union[Path, str]): Blob URL or relative blob path.
+
+        Returns:
+            str: The resolved blob name.
+
+        """
+        path_str = str(path).replace("\\", "/")
+        try:
+            # parse_blob_url validates scheme + netloc internally
+            _, blob_name = self.parse_blob_url(path_str)
+            return blob_name
+        except ValueError:
+            return path_str
+
     async def read_file(self, path: Union[Path, str]) -> bytes:
         """
         Asynchronously reads the content of a file (blob) from Azure Blob Storage.
@@ -284,7 +311,7 @@ class AzureBlobStorageIO(StorageIO):
         if not self._client_async:
             await self._create_container_client_async()
 
-        _, blob_name = self.parse_blob_url(str(path))
+        blob_name = self._resolve_blob_name(path)
 
         try:
             blob_client = self._client_async.get_blob_client(blob=blob_name)
@@ -304,14 +331,17 @@ class AzureBlobStorageIO(StorageIO):
         """
         Write data to Azure Blob Storage at the specified path.
 
+        If the provided ``path`` is a full URL, the blob name is extracted from it.
+        If a relative path is provided, it is used as the blob name directly.
+
         Args:
-            path (str): The full Azure Blob Storage URL
+            path (Union[Path, str]): Full blob URL or relative blob path.
             data (bytes): The data to write.
 
         """
         if not self._client_async:
             await self._create_container_client_async()
-        _, blob_name = self.parse_blob_url(str(path))
+        blob_name = self._resolve_blob_name(path)
         try:
             await self._upload_blob_async(file_name=blob_name, data=data, content_type=self._blob_content_type)
         except Exception as exc:
@@ -335,7 +365,7 @@ class AzureBlobStorageIO(StorageIO):
         if not self._client_async:
             await self._create_container_client_async()
         try:
-            _, blob_name = self.parse_blob_url(str(path))
+            blob_name = self._resolve_blob_name(path)
             blob_client = self._client_async.get_blob_client(blob=blob_name)
             await blob_client.get_blob_properties()
             return True
@@ -359,7 +389,7 @@ class AzureBlobStorageIO(StorageIO):
         if not self._client_async:
             await self._create_container_client_async()
         try:
-            _, blob_name = self.parse_blob_url(str(path))
+            blob_name = self._resolve_blob_name(path)
             blob_client = self._client_async.get_blob_client(blob=blob_name)
             blob_properties = await blob_client.get_blob_properties()
             return blob_properties.size > 0

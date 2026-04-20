@@ -38,7 +38,7 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
     Subsequent calls will be faster since images are cached locally.
 
     Reference: https://www.harmbench.org/
-    Paper: https://arxiv.org/abs/2402.04249
+    Paper: [@mazeika2024harmbench]
     """
 
     def __init__(
@@ -67,14 +67,8 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
         self.source_type: Literal["public_url", "file"] = source_type
         self.categories = categories
 
-        # Validate categories if provided
         if categories is not None:
-            valid_categories = {category.value for category in SemanticCategory}
-            invalid_categories = {
-                cat.value if isinstance(cat, SemanticCategory) else cat for cat in categories
-            } - valid_categories
-            if invalid_categories:
-                raise ValueError(f"Invalid semantic categories: {', '.join(invalid_categories)}")
+            self._validate_enums(categories, SemanticCategory, "semantic category")
 
     @property
     def dataset_name(self) -> str:
