@@ -13,6 +13,7 @@ from pyrit.exceptions import (
 )
 from pyrit.models import Message, construct_response_from_request
 from pyrit.prompt_target import PromptTarget, limit_requests_per_minute
+from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class WebsocketTarget(PromptTarget):
         discard_initial_messages: Optional[int] = 1,
         existing_convo: Optional[dict[str, Any]] = None,
         max_requests_per_minute: Optional[int] = None,
+        custom_configuration: Optional[TargetConfiguration] = None,
         **websockets_kwargs: Any,
     ) -> None:
         """
@@ -58,9 +60,15 @@ class WebsocketTarget(PromptTarget):
              sent after initialization and should be discarded
             existing_convo (dict[str, websockets.WebSocketClientProtocol], Optional): Existing conversations.
             max_requests_per_minute (int, Optional): Maximum number of requests per minute.
+            custom_configuration (TargetConfiguration, Optional): Override the default configuration for this
+              target instance.
             websockets_kwargs: Additional keyword arguments for websockets connection
         """
-        super().__init__(endpoint=endpoint, max_requests_per_minute=max_requests_per_minute)
+        super().__init__(
+            endpoint=endpoint,
+            max_requests_per_minute=max_requests_per_minute,
+            custom_configuration=custom_configuration,
+        )
 
         self._initialization_strings = initialization_strings
         self._response_parser = response_parser
@@ -98,12 +106,14 @@ class WebsocketTarget(PromptTarget):
 
     @limit_requests_per_minute
     @pyrit_target_retry
-    async def send_prompt_async(self, *, message: Message) -> list[Message]:
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously send a message to the WebSocket.
 
         Args:
-            message (Message): The message object containing the prompt to send.
+            normalized_conversation (list[Message]): The full conversation
+                (history + current message) after running the normalization
+                pipeline. The current message is the last element.
 
         Returns:
             list[Message]: A list containing the response from the prompt target.
@@ -111,7 +121,9 @@ class WebsocketTarget(PromptTarget):
         Raises:
             ValueError: If the message piece type is unsupported.
         """
+        message = normalized_conversation[-1]
         convo_id = message.message_pieces[0].conversation_id
+
         if convo_id not in self._existing_conversation:
             websocket = await self.connect()
             self._existing_conversation[convo_id] = websocket
@@ -129,8 +141,6 @@ class WebsocketTarget(PromptTarget):
                 result = await self.receive_messages(conversation_id=convo_id)
 
         websocket = self._existing_conversation[convo_id]
-
-        self._validate_request(message=message)
 
         request = message.message_pieces[0]
 
@@ -250,26 +260,6 @@ class WebsocketTarget(PromptTarget):
         receive_messages = asyncio.create_task(self.receive_messages(conversation_id=conversation_id))
 
         return await asyncio.wait_for(receive_messages, timeout=30.0)  # Wait for all responses to be received
-
-    def _validate_request(self, *, message: Message) -> None:
-        """
-        Validate the structure and content of a message for compatibility of this target.
-
-        Args:
-            message (Message): The message object.
-
-        Raises:
-            ValueError: If more than two message pieces are provided.
-            ValueError: If any of the message pieces have a data type other than 'text'.
-        """
-        # Check the number of message pieces
-        n_pieces = len(message.message_pieces)
-        if n_pieces != 1:
-            raise ValueError(f"This target only supports one message piece. Received: {n_pieces} pieces.")
-
-        piece_type = message.message_pieces[0].converted_value_data_type
-        if piece_type not in ["text"]:
-            raise ValueError(f"This target only supports text prompt input. Received: {piece_type}.")
 
     def is_json_response_supported(self) -> bool:
         """
