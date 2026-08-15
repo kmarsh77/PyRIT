@@ -8,14 +8,19 @@ This module provides the ConfigurationLoader class that loads PyRIT configuratio
 from YAML files and initializes PyRIT accordingly.
 """
 
+import copy
+import math
 import pathlib
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Any, ClassVar
+
+import yaml
 
 from pyrit.common.path import DEFAULT_CONFIG_PATH
+from pyrit.common.utils import verify_and_resolve_path
 from pyrit.common.yaml_loadable import YamlLoadable
-from pyrit.identifiers.class_name_utils import class_name_to_snake_case
+from pyrit.models import class_name_to_snake_case
 from pyrit.setup.initialization import (
     AZURE_SQL,
     IN_MEMORY,
@@ -24,20 +29,17 @@ from pyrit.setup.initialization import (
 )
 
 if TYPE_CHECKING:
-    from pyrit.setup.initializers.pyrit_initializer import PyRITInitializer
+    from pyrit.setup.pyrit_initializer import PyRITInitializer
 
 
 # Type alias for YAML-serializable values that can be passed as initializer args
 # This matches what YAML can represent: primitives, lists, and nested dicts
-YamlPrimitive = Union[str, int, float, bool, None]
-YamlValue = Union[YamlPrimitive, list["YamlValue"], dict[str, "YamlValue"]]
+YamlPrimitive = str | int | float | bool | None
+YamlValue = YamlPrimitive | list["YamlValue"] | dict[str, "YamlValue"]
 
-# Mapping from snake_case config values to internal constants
-_MEMORY_DB_TYPE_MAP: dict[str, str] = {
-    "in_memory": IN_MEMORY,
-    "sqlite": SQLITE,
-    "azure_sql": AZURE_SQL,
-}
+
+class _RemovedConfigurationOptionError(ValueError):
+    """Raised when a configuration contains an option removed at the v1 boundary."""
 
 
 @dataclass
@@ -51,7 +53,32 @@ class InitializerConfig:
     """
 
     name: str
-    args: Optional[dict[str, YamlValue]] = None
+    args: dict[str, YamlValue] | None = None
+
+
+@dataclass
+class ServerConfig:
+    """
+    Configuration for connecting to (or launching) a PyRIT backend server.
+
+    Attributes:
+        url: Base URL of the backend (e.g. ``http://localhost:8000``).
+        startup_timeout: Seconds to wait for a locally launched backend to become healthy.
+    """
+
+    url: str = "http://localhost:8000"
+    startup_timeout: float = 120.0
+
+
+@dataclass(frozen=True)
+class _ConfigurationLayer:
+    """A parsed configuration value and the YAML key provenance needed for merging."""
+
+    configuration: "ConfigurationLoader"
+    present_fields: frozenset[str]
+    top_level_extension_fields: frozenset[str]
+    nested_extension_fields: frozenset[str]
+    reset_extensions: bool
 
 
 @dataclass
@@ -77,10 +104,11 @@ class ConfigurationLoader(YamlLoadable):
         memory_db_type: sqlite
 
         initializers:
-          - simple
-          - name: airt
+          - scorer
+          - name: target
             args:
-              some_param: value
+              tags:
+                - default
 
         initialization_scripts:
           - /path/to/custom_initializer.py
@@ -95,18 +123,31 @@ class ConfigurationLoader(YamlLoadable):
         operation: my_operation
     """
 
+    # Mapping from snake_case config values to internal constants
+    _MEMORY_DB_TYPE_MAP: ClassVar[dict[str, str]] = {
+        "in_memory": IN_MEMORY,
+        "sqlite": SQLITE,
+        "azure_sql": AZURE_SQL,
+    }
+
     memory_db_type: str = "sqlite"
-    initializers: list[Union[str, dict[str, Any]]] = field(default_factory=list)
-    initialization_scripts: Optional[list[str]] = None
-    env_files: Optional[list[str]] = None
+    initializers: list[str | dict[str, Any]] = field(default_factory=list)
+    initialization_scripts: list[str] | None = None
+    env_files: list[str] | None = None
+    env_akv_ref: list[str] | None = None
     silent: bool = False
-    operator: Optional[str] = None
-    operation: Optional[str] = None
+    operator: str | None = None
+    operation: str | None = None
+    max_concurrent_scenario_runs: int = 3
+    allow_custom_initializers: bool = False
+    server: dict[str, Any] | None = None
+    extensions: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate and normalize the configuration after loading."""
         self._normalize_memory_db_type()
         self._normalize_initializers()
+        self._normalize_server()
 
     def _normalize_memory_db_type(self) -> None:
         """
@@ -123,12 +164,12 @@ class ConfigurationLoader(YamlLoadable):
         normalized = self.memory_db_type.lower().replace("-", "_")
 
         # Also handle PascalCase inputs (e.g., "InMemory" -> "in_memory")
-        if normalized not in _MEMORY_DB_TYPE_MAP:
+        if normalized not in self._MEMORY_DB_TYPE_MAP:
             # Try converting from PascalCase
             normalized = class_name_to_snake_case(self.memory_db_type)
 
-        if normalized not in _MEMORY_DB_TYPE_MAP:
-            valid_types = list(_MEMORY_DB_TYPE_MAP.keys())
+        if normalized not in self._MEMORY_DB_TYPE_MAP:
+            valid_types = list(self._MEMORY_DB_TYPE_MAP.keys())
             raise ValueError(
                 f"Invalid memory_db_type '{self.memory_db_type}'. Must be one of: {', '.join(valid_types)}"
             )
@@ -166,6 +207,50 @@ class ConfigurationLoader(YamlLoadable):
                 raise ValueError(f"Initializer entry must be a string or dict, got: {type(entry).__name__}")
         self._initializer_configs = normalized
 
+    def _normalize_server(self) -> None:
+        """
+        Normalize the optional ``server`` block to a ``ServerConfig``.
+
+        Accepts ``None`` (no server configured) or a mapping with ``url`` and
+        ``startup_timeout`` fields.
+
+        Raises:
+            ValueError: If ``server`` is invalid.
+        """
+        if self.server is None:
+            self._server_config: ServerConfig | None = None
+            return
+
+        if isinstance(self.server, dict):
+            url = self.server.get("url", "http://localhost:8000")
+            if not isinstance(url, str):
+                raise ValueError(f"Server 'url' must be a string. Got: {type(url).__name__}")
+            startup_timeout = self.server.get("startup_timeout", 120.0)
+            if (
+                isinstance(startup_timeout, bool)
+                or not isinstance(startup_timeout, int | float)
+                or not math.isfinite(startup_timeout)
+                or startup_timeout <= 0
+            ):
+                raise ValueError("Server 'startup_timeout' must be a finite number greater than 0.")
+            self._server_config = ServerConfig(
+                url=url.rstrip("/"),
+                startup_timeout=float(startup_timeout),
+            )
+            return
+
+        raise ValueError(f"Server entry must be a dict, got: {type(self.server).__name__}")
+
+    @property
+    def server_config(self) -> ServerConfig | None:
+        """The normalized ``server:`` block, or ``None`` when not configured."""
+        return self._server_config
+
+    @property
+    def initializer_configs(self) -> Sequence[InitializerConfig]:
+        """The ordered initializer configurations with registry names normalized to snake case."""
+        return self._initializer_configs
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ConfigurationLoader":
         """
@@ -176,19 +261,146 @@ class ConfigurationLoader(YamlLoadable):
 
         Returns:
             A new ConfigurationLoader instance.
+
+        Raises:
+            _RemovedConfigurationOptionError: If the removed ``scenario`` block is present.
+            ValueError: If ``extensions`` is present but not a dict.
         """
+        return cls._parse_layer(data=data).configuration
+
+    @classmethod
+    def _parse_layer(cls, *, data: dict[str, Any]) -> _ConfigurationLayer:
+        """
+        Parse a configuration layer while retaining its YAML key provenance.
+
+        Args:
+            data: Dictionary containing one configuration layer.
+
+        Returns:
+            _ConfigurationLayer: The validated value and its merge provenance.
+
+        Raises:
+            _RemovedConfigurationOptionError: If the removed ``scenario`` block is present.
+            ValueError: If ``extensions`` is present but invalid.
+        """
+        if "scenario" in data:
+            raise _RemovedConfigurationOptionError(
+                "The 'scenario' configuration block is no longer supported. "
+                "Pass the scenario name positionally and its parameters as CLI flags."
+            )
+        present_fields = frozenset(data)
         # Filter out None values only - empty lists are meaningful ("load nothing")
         filtered_data = {k: v for k, v in data.items() if v is not None}
-        return cls(**filtered_data)
+        known_fields = {config_field.name for config_field in fields(cls) if config_field.init}
+        top_level_extension_fields = frozenset(data.keys() - known_fields)
+        known_data = {k: v for k, v in filtered_data.items() if k in known_fields and k != "extensions"}
+        extra_data = {k: v for k, v in filtered_data.items() if k not in known_fields}
+        nested_extension_fields: frozenset[str] = frozenset()
+        reset_extensions = False
+        if "extensions" in data:
+            raw_extensions = data["extensions"]
+            reset_extensions = raw_extensions is None or raw_extensions == {}
+            if isinstance(raw_extensions, dict):
+                if not all(isinstance(key, str) for key in raw_extensions):
+                    raise ValueError("ConfigurationLoader.extensions keys must be strings.")
+                nested_extension_fields = frozenset(key for key in raw_extensions if isinstance(key, str))
+        if "extensions" in filtered_data:
+            extensions = filtered_data["extensions"]
+            if not isinstance(extensions, dict):
+                raise ValueError(f"ConfigurationLoader.extensions must be a dict. Got: {type(extensions).__name__}")
+            extra_data = {**extra_data, **extensions}
+        config = cls(**known_data, extensions=extra_data)
+        return _ConfigurationLayer(
+            configuration=config,
+            present_fields=present_fields,
+            top_level_extension_fields=top_level_extension_fields,
+            nested_extension_fields=nested_extension_fields,
+            reset_extensions=reset_extensions,
+        )
+
+    @classmethod
+    def _load_layer_from_yaml_file(cls, *, file: pathlib.Path | str) -> _ConfigurationLayer:
+        """
+        Load a configuration layer from YAML without attaching merge state to its value.
+
+        Args:
+            file: YAML configuration file path.
+
+        Returns:
+            _ConfigurationLayer: The validated value and its merge provenance.
+
+        Raises:
+            ValueError: If the YAML is invalid or empty.
+        """
+        file_path = verify_and_resolve_path(file)
+        try:
+            yaml_data = yaml.safe_load(file_path.read_text("utf-8"))
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Invalid YAML file '{file_path}': {exc}") from exc
+        if yaml_data is None:
+            raise ValueError(f"YAML file '{file_path}' is empty.")
+        return cls._parse_layer(data=yaml_data)
 
     @staticmethod
-    def load_with_overrides(
-        config_file: Optional[pathlib.Path] = None,
+    def _merge_server_blocks(
         *,
-        memory_db_type: Optional[str] = None,
-        initializers: Optional[Sequence[Union[str, dict[str, Any]]]] = None,
-        initialization_scripts: Optional[Sequence[str]] = None,
-        env_files: Optional[Sequence[str]] = None,
+        inherited: dict[str, Any] | None,
+        overlay: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """
+        Merge server fields while preserving an explicit null reset.
+
+        Args:
+            inherited: Server fields inherited from earlier layers.
+            overlay: Server fields from the current layer.
+
+        Returns:
+            dict[str, Any] | None: The merged server block, or ``None`` for an explicit reset.
+        """
+        if overlay is None:
+            return None
+        inherited_fields = inherited if isinstance(inherited, dict) else {}
+        return {**copy.deepcopy(inherited_fields), **copy.deepcopy(overlay)}
+
+    @classmethod
+    def _apply_layer(
+        cls,
+        *,
+        config_data: dict[str, Any],
+        layer: _ConfigurationLayer,
+        init_fields: set[str],
+    ) -> None:
+        """Apply a parsed layer to mutable merged configuration data."""
+        explicit_data = {name: copy.deepcopy(getattr(layer.configuration, name)) for name in init_fields}
+        for field_name in layer.present_fields & (init_fields - {"extensions"}):
+            if field_name == "server":
+                config_data["server"] = cls._merge_server_blocks(
+                    inherited=config_data["server"],
+                    overlay=layer.configuration.server,
+                )
+            else:
+                config_data[field_name] = explicit_data[field_name]
+
+        if layer.reset_extensions:
+            config_data["extensions"] = {}
+        for field_name in layer.top_level_extension_fields:
+            if field_name in layer.configuration.extensions:
+                config_data["extensions"][field_name] = layer.configuration.extensions[field_name]
+            else:
+                config_data["extensions"].pop(field_name, None)
+        for field_name in layer.nested_extension_fields:
+            config_data["extensions"][field_name] = layer.configuration.extensions[field_name]
+
+    @classmethod
+    def load_with_overrides(
+        cls,
+        config_file: pathlib.Path | None = None,
+        *,
+        memory_db_type: str | None = None,
+        initializers: Sequence[str | dict[str, Any]] | None = None,
+        initialization_scripts: Sequence[str] | None = None,
+        env_files: Sequence[str] | None = None,
+        env_akv_ref: Sequence[str] | None = None,
     ) -> "ConfigurationLoader":
         """
         Load configuration with optional overrides.
@@ -198,57 +410,41 @@ class ConfigurationLoader(YamlLoadable):
         2. Explicit config_file argument if provided
         3. Individual override arguments (non-None values take precedence)
 
-        This is a staticmethod (not classmethod) because it's a pure factory function
-        that doesn't need access to class state and can be reused by multiple interfaces
-        (CLI, shell, programmatic API).
-
         Args:
             config_file: Optional path to a YAML-formatted configuration file.
             memory_db_type: Override for database type (in_memory, sqlite, azure_sql).
             initializers: Override for initializer list.
             initialization_scripts: Override for initialization script paths.
             env_files: Override for environment file paths.
+            env_akv_ref: Override for Azure Key Vault secret URLs.
 
         Returns:
             A merged ConfigurationLoader instance.
 
         Raises:
             FileNotFoundError: If an explicitly specified config_file does not exist.
+            _RemovedConfigurationOptionError: If the removed ``scenario`` block is present.
             ValueError: If the configuration is invalid.
         """
         import logging
 
         logger = logging.getLogger(__name__)
 
-        # Start with defaults - None means "use defaults", [] means "load nothing"
-        config_data: dict[str, Any] = {
-            "memory_db_type": "sqlite",
-            "initializers": [],
-            "initialization_scripts": None,  # None = use defaults
-            "env_files": None,  # None = use defaults
-            "silent": False,
-        }
+        init_fields = {config_field.name for config_field in fields(cls) if config_field.init}
+
+        def to_init_data(config: ConfigurationLoader) -> dict[str, Any]:
+            return {name: copy.deepcopy(getattr(config, name)) for name in init_fields}
 
         # 1. Try loading default config file if it exists
+        config_data = to_init_data(cls())
         default_config_path = DEFAULT_CONFIG_PATH
         if default_config_path.exists():
             try:
                 logger.info(f"Loading default configuration file: {default_config_path}")
                 print(f"Loading default configuration file: {default_config_path}")
-                default_config = ConfigurationLoader.from_yaml_file(default_config_path)
-                config_data["memory_db_type"] = default_config.memory_db_type
-                config_data["initializers"] = [
-                    {"name": ic.name, "args": ic.args} if ic.args else ic.name
-                    for ic in default_config._initializer_configs
-                ]
-                # Preserve None vs [] distinction from config file
-                config_data["initialization_scripts"] = default_config.initialization_scripts
-                config_data["env_files"] = default_config.env_files
-                config_data["silent"] = default_config.silent
-                if default_config.operator:
-                    config_data["operator"] = default_config.operator
-                if default_config.operation:
-                    config_data["operation"] = default_config.operation
+                config_data = to_init_data(cls.from_yaml_file(default_config_path))
+            except _RemovedConfigurationOptionError:
+                raise
             except Exception as e:
                 logger.warning(f"Failed to load default config file {default_config_path}: {e}")
 
@@ -258,21 +454,8 @@ class ConfigurationLoader(YamlLoadable):
                 raise FileNotFoundError(f"Configuration file not found: {config_file}")
             logger.info(f"Loading configuration file: {config_file}")
             print(f"Loading configuration file: {config_file}")
-            explicit_config = ConfigurationLoader.from_yaml_file(config_file)
-            config_data["memory_db_type"] = explicit_config.memory_db_type
-            config_data["initializers"] = [
-                {"name": ic.name, "args": ic.args} if ic.args else ic.name
-                for ic in explicit_config._initializer_configs
-            ]
-            # Preserve None vs [] distinction from config file
-            config_data["initialization_scripts"] = explicit_config.initialization_scripts
-            config_data["env_files"] = explicit_config.env_files
-            config_data["silent"] = explicit_config.silent
-            if explicit_config.operator:
-                config_data["operator"] = explicit_config.operator
-            if explicit_config.operation:
-                config_data["operation"] = explicit_config.operation
-
+            explicit_layer = cls._load_layer_from_yaml_file(file=config_file)
+            cls._apply_layer(config_data=config_data, layer=explicit_layer, init_fields=init_fields)
         # 3. Apply overrides (non-None values take precedence)
         # Convert Sequence to list to match dataclass field types
         if memory_db_type is not None:
@@ -293,7 +476,10 @@ class ConfigurationLoader(YamlLoadable):
         if env_files is not None:
             config_data["env_files"] = list(env_files)
 
-        return ConfigurationLoader.from_dict(config_data)
+        if env_akv_ref is not None:
+            config_data["env_akv_ref"] = list(env_akv_ref)
+
+        return cls.from_dict(config_data)
 
     @classmethod
     def get_default_config_path(cls) -> pathlib.Path:
@@ -305,7 +491,7 @@ class ConfigurationLoader(YamlLoadable):
         """
         return DEFAULT_CONFIG_PATH
 
-    def _resolve_initializers(self) -> Sequence["PyRITInitializer"]:
+    def resolve_initializers(self) -> Sequence["PyRITInitializer"]:
         """
         Resolve initializer names to PyRITInitializer instances.
 
@@ -318,34 +504,33 @@ class ConfigurationLoader(YamlLoadable):
         Raises:
             ValueError: If an initializer name is not found in the registry.
         """
+        import logging
+
         from pyrit.registry import InitializerRegistry
 
-        if not self._initializer_configs:
+        configs = self._initializer_configs
+        if not configs:
             return []
 
         registry = InitializerRegistry()
         resolved: list[PyRITInitializer] = []
 
-        for config in self._initializer_configs:
-            initializer_class = registry.get_class(config.name)
-            if initializer_class is None:
-                available = ", ".join(sorted(registry.get_names()))
+        logging.getLogger(__name__).info("Running %d initializer(s)...", len(configs))
+
+        for config in configs:
+            try:
+                instance = registry.create_and_configure(config.name, initializer_params=config.args)
+            except KeyError as exc:
+                available = ", ".join(sorted(registry.get_class_names()))
                 raise ValueError(
                     f"Initializer '{config.name}' not found in registry.\nAvailable initializers: {available}"
-                )
-
-            # Instantiate and set params if provided
-            instance = initializer_class()
-            if config.args:
-                instance.set_params_from_args(args=config.args)
-                # Validate params early against supported_parameters to fail fast
-                instance._validate_params(params=instance.params)
+                ) from exc
 
             resolved.append(instance)
 
         return resolved
 
-    def _resolve_initialization_scripts(self) -> Optional[Sequence[pathlib.Path]]:
+    def resolve_initialization_scripts(self) -> Sequence[pathlib.Path] | None:
         """
         Resolve initialization script paths.
 
@@ -370,7 +555,7 @@ class ConfigurationLoader(YamlLoadable):
 
         return resolved
 
-    def _resolve_env_files(self) -> Optional[Sequence[pathlib.Path]]:
+    def resolve_env_files(self) -> Sequence[pathlib.Path] | None:
         """
         Resolve environment file paths.
 
@@ -395,34 +580,46 @@ class ConfigurationLoader(YamlLoadable):
 
         return resolved
 
+    def resolve_env_akv_ref(self) -> list[str] | None:
+        """
+        Return the list of AKV secret URLs, or ``None`` when not configured.
+
+        Returns:
+            list[str] | None: The configured AKV secret URLs, or ``None``.
+        """
+        return self.env_akv_ref
+
     async def initialize_pyrit_async(self) -> None:
         """
         Initialize PyRIT with the loaded configuration.
 
-        This method resolves all initializer names to instances and calls
-        the core initialize_pyrit_async function.
+        Resolves the ``.pyrit_conf`` baseline initializers to instances and calls the core
+        ``initialize_pyrit_async`` function. This method is intentionally unaware of any
+        persisted additional initializers: consumers such as ``pyrit.backend.main.lifespan``
+        run those after the baseline.
 
         Raises:
             ValueError: If configuration is invalid or initializers cannot be resolved.
         """
-        resolved_initializers = self._resolve_initializers()
-        resolved_scripts = self._resolve_initialization_scripts()
-        resolved_env_files = self._resolve_env_files()
+        resolved_initializers = self.resolve_initializers()
+        resolved_scripts = self.resolve_initialization_scripts()
+        resolved_env_files = self.resolve_env_files()
 
         # Map snake_case memory_db_type to internal constant
-        internal_memory_db_type = _MEMORY_DB_TYPE_MAP[self.memory_db_type]
+        internal_memory_db_type = self._MEMORY_DB_TYPE_MAP[self.memory_db_type]
 
         await initialize_pyrit_async(
             memory_db_type=internal_memory_db_type,
             initialization_scripts=resolved_scripts,
             initializers=resolved_initializers if resolved_initializers else None,
             env_files=resolved_env_files,
+            env_akv_ref=self.env_akv_ref,
             silent=self.silent,
         )
 
 
 async def initialize_from_config_async(
-    config_path: Optional[Union[str, pathlib.Path]] = None,
+    config_path: str | pathlib.Path | None = None,
 ) -> ConfigurationLoader:
     """
     Initialize PyRIT from a configuration file.

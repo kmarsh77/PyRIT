@@ -5,8 +5,8 @@ import json
 import logging
 import os
 from abc import ABC
-from collections.abc import Callable
-from typing import Any, Optional
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from openai import RateLimitError
 from tenacity import (
@@ -176,14 +176,14 @@ class RateLimitException(PyritException):
 class ServerErrorException(PyritException):
     """Exception class for opaque 5xx errors returned by the server."""
 
-    def __init__(self, *, status_code: int = 500, message: str = "Server Error", body: Optional[str] = None) -> None:
+    def __init__(self, *, status_code: int = 500, message: str = "Server Error", body: str | None = None) -> None:
         """
         Initialize a server error exception.
 
         Args:
             status_code (int): Status code for the error.
             message (str): Error message.
-            body (Optional[str]): Optional raw server response body.
+            body (str | None): Optional raw server response body.
 
         """
         super().__init__(status_code=status_code, message=message)
@@ -203,6 +203,61 @@ class EmptyResponseException(BadRequestException):
 
         """
         super().__init__(status_code=status_code, message=message)
+
+
+class ScorerLLMResponseBlockedException(BadRequestException):
+    """Exception raised when a scorer's own LLM response is blocked by content filtering."""
+
+    def __init__(self, *, status_code: int = 400, message: str = "Scorer LLM response blocked") -> None:
+        """
+        Initialize a scorer-response-blocked exception.
+
+        Args:
+            status_code (int): Status code for the error.
+            message (str): Error message.
+
+        """
+        super().__init__(status_code=status_code, message=message)
+
+
+class ScenarioPartialFailureException(PyritException, ValueError):  # noqa: N818
+    """
+    Exception raised when a scenario's atomic attack only partially completes.
+
+    ``ValueError`` remains a secondary base for compatibility with callers that
+    caught the legacy synthetic exception. New code should catch this dedicated type.
+    """
+
+    def __init__(
+        self,
+        *,
+        atomic_attack_name: str,
+        completed_count: int,
+        incomplete_objectives: Sequence[tuple[str, BaseException]],
+    ) -> None:
+        """
+        Initialize a scenario partial-failure exception.
+
+        Args:
+            atomic_attack_name (str): Name of the partially completed atomic attack.
+            completed_count (int): Number of objectives completed in the failed attempt.
+            incomplete_objectives (Sequence[tuple[str, BaseException]]): Objective failures.
+        """
+        self.atomic_attack_name = atomic_attack_name
+        self.completed_count = completed_count
+        self.incomplete_objectives = tuple(incomplete_objectives)
+        self.incomplete_count = len(self.incomplete_objectives)
+        self.total_count = self.completed_count + self.incomplete_count
+
+        super().__init__(
+            message=(
+                f"Atomic attack '{self.atomic_attack_name}' partially failed: "
+                f"{self.incomplete_count} of {self.total_count} objectives incomplete. "
+                "See attack results for details."
+            )
+        )
+        if self.incomplete_objectives:
+            self.__cause__ = self.incomplete_objectives[0][1]
 
 
 class InvalidJsonException(PyritException):
@@ -233,8 +288,21 @@ class MissingPromptPlaceholderException(PyritException):
         super().__init__(message=message)
 
 
+class ExperimentalWarning(FutureWarning):
+    """
+    Warning category for experimental PyRIT modules whose APIs may change at any time.
+
+    Modules emitting this warning are not covered by PyRIT's normal deprecation policy.
+    To silence it, filter the category before importing the experimental module::
+
+        import warnings
+        from pyrit.exceptions import ExperimentalWarning
+        warnings.filterwarnings("ignore", category=ExperimentalWarning)
+    """
+
+
 def pyrit_custom_result_retry(
-    retry_function: Callable[..., bool], retry_max_num_attempts: Optional[int] = None
+    retry_function: Callable[..., bool], retry_max_num_attempts: int | None = None
 ) -> Callable[..., Any]:
     """
     Apply retry logic with exponential backoff to a function.
@@ -343,6 +411,33 @@ def pyrit_placeholder_retry(func: Callable[..., Any]) -> Callable[..., Any]:
     )(func)
 
 
+# Empirically-observed markers in OpenAI / Azure OpenAI / MAI error payloads that
+# indicate the response was blocked by a content filter or safety system.
+#
+# There is no canonical spec for these - providers expose the signal through
+# different field names (``error.code``, ``finish_reason``, ``incomplete_details.reason``,
+# free-form ``error.message``) and the exact wording evolves over time. Rather than
+# try to track every (provider, field) combination as an exact match, we scan the
+# entire payload as a substring search for resilience: adding support for a new
+# provider variant is then a one-line change to the set below.
+#
+# Each marker below is justified by a concrete provider response shape:
+#   - ``content_filter``           - OpenAI ``finish_reason``; Azure ``error.code``;
+#                                    Azure ``content_filter_results`` field name.
+#   - ``content_safety_violation`` - MAI image models ``error.code`` (added in PR #1890).
+#   - ``policy_violation``         - Substring of Azure's ``content_policy_violation``
+#                                    and OpenAI moderation's ``usage_policy_violation``.
+#   - ``moderation_blocked``       - OpenAI moderation ``error.code``.
+CONTENT_FILTER_MARKERS = frozenset(
+    {
+        "content_filter",
+        "content_safety_violation",
+        "policy_violation",
+        "moderation_blocked",
+    }
+)
+
+
 def handle_bad_request_exception(
     response_text: str,
     request: MessagePiece,
@@ -351,6 +446,11 @@ def handle_bad_request_exception(
 ) -> Message:
     """
     Handle bad request responses and map them to standardized error messages.
+
+    The content-filter fallback substring-scans ``response_text`` against
+    ``CONTENT_FILTER_MARKERS`` so callers that do not pre-compute
+    ``is_content_filter`` (e.g. ``azure_ml_chat_target``) still benefit from
+    the full marker set.
 
     Args:
         response_text (str): Raw response text from the target.
@@ -365,11 +465,7 @@ def handle_bad_request_exception(
         RuntimeError: If the response does not match bad-request content-filter conditions.
 
     """
-    if (
-        "content_filter" in response_text
-        or "Invalid prompt: your prompt was flagged as potentially violating our usage policy." in response_text
-        or is_content_filter
-    ):
+    if is_content_filter or any(marker in response_text for marker in CONTENT_FILTER_MARKERS):
         # Handle bad request error when content filter system detects harmful content
         bad_request_exception = BadRequestException(status_code=error_code, message=response_text)
         resp_text = bad_request_exception.process_exception()

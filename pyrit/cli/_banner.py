@@ -21,7 +21,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 from pyrit.cli._banner_assets import BRAILLE_RACCOON, PYRIT_LETTERS, PYRIT_WIDTH, RACCOON_TAIL
 
@@ -199,7 +198,7 @@ def _build_static_banner() -> StaticBannerData:
     color_map: dict[int, ColorRole] = {}
     segment_colors: dict[int, list[tuple[int, int, ColorRole]]] = {}
 
-    def add(line: str, role: ColorRole, segments: Optional[list[tuple[int, int, ColorRole]]] = None) -> None:
+    def add(line: str, role: ColorRole, segments: list[tuple[int, int, ColorRole]] | None = None) -> None:
         idx = len(lines)
         color_map[idx] = role
         if segments:
@@ -256,9 +255,10 @@ def _build_static_banner() -> StaticBannerData:
         "  • list-scenarios        - See all available scenarios",
         "  • list-initializers     - See all available initializers",
         "  • list-targets [opts]   - See all available targets in the registry",
+        "  • list-converters       - See all registered converter instances",
         "  • run <scenario> [opts] - Execute a security scenario",
         "  • scenario-history      - View your session history",
-        "  • print-scenario [N]    - Display detailed results",
+        "  • scenario-results [id] - Inspect a run's attack results",
         "  • help [command]        - Get help on any command",
         "  • clear                 - Clear the screen",
         "  • exit                  - Quit the shell",
@@ -559,20 +559,20 @@ def _render_line_with_segments(
     """
     reset = _get_color(ColorRole.RESET, theme)
     # Build per-character color map (later segments override earlier ones)
-    char_roles: list[Optional[ColorRole]] = [None] * len(line)
+    char_roles: list[ColorRole | None] = [None] * len(line)
     for start, end, role in segments:
         for pos in range(start, min(end, len(line))):
             char_roles[pos] = role
 
     # Group consecutive same-role characters for efficient rendering
     result: list[str] = []
-    current_role: Optional[ColorRole] = None
+    current_role: ColorRole | None = None
     for pos, ch in enumerate(line):
-        role = char_roles[pos]
-        if role != current_role:
-            color = _get_color(role, theme) if role else reset
+        char_role = char_roles[pos]
+        if char_role != current_role:
+            color = _get_color(char_role, theme) if char_role else reset
             result.append(color)
-            current_role = role
+            current_role = char_role
         result.append(ch)
     result.append(reset)
     return "".join(result)

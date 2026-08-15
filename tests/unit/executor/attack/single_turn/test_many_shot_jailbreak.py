@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pyrit.converter import Base64Converter
 from pyrit.executor.attack import (
     AttackConverterConfig,
     AttackParameters,
@@ -13,14 +14,13 @@ from pyrit.executor.attack import (
     ManyShotJailbreakAttack,
     SingleTurnAttackContext,
 )
-from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import (
     AttackOutcome,
     AttackResult,
+    ComponentIdentifier,
     SeedPrompt,
 )
-from pyrit.prompt_converter import Base64Converter
-from pyrit.prompt_normalizer import PromptConverterConfiguration, PromptNormalizer
+from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 from pyrit.score import TrueFalseScorer
 
@@ -245,7 +245,6 @@ class TestManyShotJailbreakAttackExecution:
 
     @patch("pyrit.executor.attack.single_turn.many_shot_jailbreak.SeedPrompt.from_yaml_file")
     @patch("pyrit.executor.attack.single_turn.many_shot_jailbreak.load_many_shot_jailbreaking_dataset")
-    @pytest.mark.asyncio
     async def test_perform_attack_renders_template_correctly(
         self,
         mock_fetch_dataset,
@@ -293,7 +292,6 @@ class TestManyShotJailbreakAttackExecution:
 
     @patch("pyrit.executor.attack.single_turn.many_shot_jailbreak.SeedPrompt.from_yaml_file")
     @patch("pyrit.executor.attack.single_turn.many_shot_jailbreak.load_many_shot_jailbreaking_dataset")
-    @pytest.mark.asyncio
     async def test_perform_attack_with_custom_examples(
         self, mock_fetch_dataset, mock_from_yaml, mock_objective_target, mock_template, basic_context
     ):
@@ -332,7 +330,6 @@ class TestManyShotJailbreakAttackLifecycle:
 
     @patch("pyrit.executor.attack.single_turn.many_shot_jailbreak.SeedPrompt.from_yaml_file")
     @patch("pyrit.executor.attack.single_turn.many_shot_jailbreak.load_many_shot_jailbreaking_dataset")
-    @pytest.mark.asyncio
     async def test_execute_async_successful_lifecycle(
         self,
         mock_fetch_dataset,
@@ -376,7 +373,6 @@ class TestManyShotJailbreakAttackWithConverters:
 
     @patch("pyrit.executor.attack.single_turn.many_shot_jailbreak.SeedPrompt.from_yaml_file")
     @patch("pyrit.executor.attack.single_turn.many_shot_jailbreak.load_many_shot_jailbreaking_dataset")
-    @pytest.mark.asyncio
     async def test_attack_with_request_converters(
         self,
         mock_fetch_dataset,
@@ -391,7 +387,7 @@ class TestManyShotJailbreakAttackWithConverters:
         mock_fetch_dataset.return_value = sample_many_shot_examples
 
         converter_config = AttackConverterConfig(
-            request_converters=PromptConverterConfiguration.from_converters(converters=[Base64Converter()])
+            request_converters=ConverterConfiguration.from_converters(converters=[Base64Converter()])
         )
 
         attack = ManyShotJailbreakAttack(

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { makeTarget } from "./_targets";
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -49,6 +50,14 @@ const MOCK_CATALOG = {
       description: "Compresses images.",
     },
     {
+      converter_type: "AddImageTextConverter",
+      supported_input_types: ["text"],
+      supported_output_types: ["image_path"],
+      parameters: [],
+      is_llm_based: false,
+      description: "Renders text onto a generated image.",
+    },
+    {
       converter_type: "TranslationConverter",
       supported_input_types: ["text"],
       supported_output_types: ["text"],
@@ -60,6 +69,17 @@ const MOCK_CATALOG = {
 };
 
 const MOCK_CONVERSATION_ID = "e2e-conv-001";
+
+// 1x1 transparent PNG returned by the mock /api/media route so that the
+// inline image preview <img> element can resolve its src in headless mode.
+const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGIAAgAABQABDQotsgAAAABJRU5ErkJggg==";
+
+// Map of mock image-output converter types → path returned by the preview
+// mock. Used to decide whether to emit text vs. image_path output.
+const IMAGE_OUTPUT_CONVERTERS: Record<string, string> = {
+  AddImageTextConverter: "/tmp/output.png",
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -73,6 +93,9 @@ const MOCK_CONVERSATION_ID = "e2e-conv-001";
  */
 async function mockBackendAPIs(page: Page) {
   let accumulatedMessages: Record<string, unknown>[] = [];
+  // Track the converter type for each created converter instance so the
+  // preview mock can decide between text and image_path output.
+  const converterTypeById: Record<string, string> = {};
 
   // ── Converter-specific routes ──────────────────────────────────────────
 
@@ -89,6 +112,26 @@ async function mockBackendAPIs(page: Page) {
   await page.route(/\/api\/converters\/preview/, async (route) => {
     if (route.request().method() === "POST") {
       const body = JSON.parse(route.request().postData() ?? "{}");
+      const converterIds: string[] = body.converter_ids ?? [];
+      const converterType = converterTypeById[converterIds[0] ?? ""] ?? "";
+
+      // Image-output converters emit a file path the frontend renders via
+      // /api/media → triggers the convertedFileChip + inline preview branch.
+      if (IMAGE_OUTPUT_CONVERTERS[converterType]) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            original_value: body.original_value,
+            original_value_data_type: body.original_value_data_type ?? "text",
+            converted_value: IMAGE_OUTPUT_CONVERTERS[converterType],
+            converted_value_data_type: "image_path",
+            steps: [],
+          }),
+        });
+        return;
+      }
+
       const converted = Buffer.from(body.original_value ?? "").toString("base64");
       await route.fulfill({
         status: 200,
@@ -108,11 +151,13 @@ async function mockBackendAPIs(page: Page) {
   await page.route(/\/api\/converters$/, async (route) => {
     if (route.request().method() === "POST") {
       const body = JSON.parse(route.request().postData() ?? "{}");
+      const converterId = `mock-converter-${body.type}`;
+      converterTypeById[converterId] = body.type;
       await route.fulfill({
         status: 201,
         contentType: "application/json",
         body: JSON.stringify({
-          converter_id: "mock-converter-001",
+          converter_id: converterId,
           converter_type: body.type,
           display_name: null,
         }),
@@ -120,6 +165,16 @@ async function mockBackendAPIs(page: Page) {
     } else {
       await route.continue();
     }
+  });
+
+  // Media route — serves the generated image referenced by the preview
+  // mock. Returning a tiny valid PNG keeps the <img> element layout-stable.
+  await page.route(/\/api\/media\?path=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "image/png",
+      body: Buffer.from(TINY_PNG_BASE64, "base64"),
+    });
   });
 
   // ── Standard chat routes (matching chat.spec.ts pattern) ───────────────
@@ -132,13 +187,22 @@ async function mockBackendAPIs(page: Page) {
         contentType: "application/json",
         body: JSON.stringify({
           items: [
-            {
+            makeTarget({
               target_registry_name: "mock-openai-chat",
               target_type: "OpenAIChatTarget",
               endpoint: "https://mock.openai.com",
               model_name: "gpt-4o-mock",
-              supports_multi_turn: true,
-            },
+              capabilities: {
+                supports_multi_turn: true,
+                supports_multi_message_pieces: false,
+                supports_json_schema: false,
+                supports_json_output: false,
+                supports_editable_history: false,
+                supports_system_prompt: false,
+                supported_input_data_types: ["text"],
+                supported_output_data_types: ["text"],
+              },
+            }),
           ],
           pagination: { limit: 50, has_more: false },
         }),
@@ -179,9 +243,9 @@ async function mockBackendAPIs(page: Page) {
         turn_number: turnNumber,
         role: "user",
         created_at: new Date().toISOString(),
-        pieces: [
+        message_pieces: [
           {
-            piece_id: `piece-u-${turnNumber}`,
+            id: `piece-u-${turnNumber}`,
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: userText,
@@ -195,9 +259,9 @@ async function mockBackendAPIs(page: Page) {
         turn_number: turnNumber,
         role: "assistant",
         created_at: new Date().toISOString(),
-        pieces: [
+        message_pieces: [
           {
-            piece_id: `piece-a-${turnNumber}`,
+            id: `piece-a-${turnNumber}`,
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: `Mock response for: ${displayText}`,
@@ -353,7 +417,7 @@ async function activateMockTarget(page: Page) {
   await setActiveBtn.click();
 
   await page.getByTitle("Chat", { exact: true }).click();
-  await expect(page.getByText("PyRIT Attack")).toBeVisible({ timeout: 5000 });
+  await expect(page.getByTestId("new-attack-btn")).toBeVisible({ timeout: 5000 });
 }
 
 /** Open converter panel and select a converter by name. */
@@ -505,5 +569,47 @@ test.describe("Converter Panel", () => {
 
     // The converter badge should be visible in the attack table
     await expect(page.getByText("Base64Converter")).toBeVisible({ timeout: 10000 });
+  });
+
+  test("should render inline image preview in input box after a text→image conversion", async ({ page }) => {
+    // Type a prompt before opening the panel
+    await page.getByTestId("chat-input").fill("hello world");
+
+    // Select AddImageTextConverter (text input → image_path output)
+    await selectConverter(page, "AddImageTextConverter");
+
+    // Auto-preview only fires for text-output converters, so click Preview
+    await page.getByTestId("converter-preview-btn").click();
+    await expect(page.getByTestId("converter-preview-result")).toBeVisible({ timeout: 10000 });
+
+    // Apply the converted value to the input
+    await page.getByTestId("use-converted-btn").click();
+
+    // Close converter panel so the input area is unobscured
+    await page.getByTestId("close-converter-panel-btn").click();
+    await expect(page.getByTestId("converter-panel")).not.toBeVisible();
+
+    // The converted-file-chip block is rendered in the input area for image_path outputs
+    const chip = page.getByTestId("converted-file-chip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("output.png");
+
+    // The inline image preview is rendered alongside the filename + Open link
+    const preview = page.getByTestId("converted-file-preview-image");
+    await expect(preview).toBeVisible({ timeout: 10000 });
+    await expect(preview).toHaveAttribute("src", /\/api\/media\?path=/);
+    await expect(preview).toHaveAttribute("alt", "output.png");
+
+    // The Open link is still present alongside the preview
+    await expect(page.getByTestId("converted-file-open")).toHaveAttribute("href", /\/api\/media\?path=/);
+
+    // Audio / video previews must NOT be rendered for an image conversion
+    await expect(page.getByTestId("converted-file-preview-audio")).toHaveCount(0);
+    await expect(page.getByTestId("converted-file-preview-video")).toHaveCount(0);
+
+    // Dismissing the chip clears the entire block (including the preview)
+    await page.getByTestId("clear-converted-file-chip").click();
+    await expect(chip).not.toBeVisible();
+    await expect(page.getByTestId("converted-file-preview-image")).toHaveCount(0);
   });
 });

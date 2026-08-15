@@ -2,6 +2,8 @@
 # Licensed under the MIT license.
 
 import textwrap
+import typing
+import warnings
 from dataclasses import fields as dc_fields
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,16 +11,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+import pyrit.datasets.seed_datasets.remote  # noqa: F401  triggers loader registration
 from pyrit.datasets import SeedDatasetProvider
 from pyrit.datasets.seed_datasets.local.local_dataset_loader import _LocalDatasetLoader
+from pyrit.datasets.seed_datasets.remote.agent_threat_rules_dataset import (
+    _AgentThreatRulesDataset,
+)
 from pyrit.datasets.seed_datasets.remote.darkbench_dataset import _DarkBenchDataset
 from pyrit.datasets.seed_datasets.remote.harmbench_dataset import _HarmBenchDataset
+from pyrit.datasets.seed_datasets.remote.promptintel_dataset import _PromptIntelDataset
+from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import _RemoteDatasetLoader
 from pyrit.datasets.seed_datasets.seed_metadata import (
+    RECOMMENDED_TAGS,
     SeedDatasetFilter,
     SeedDatasetLoadTime,
     SeedDatasetMetadata,
+    SeedDatasetSizeCategory,
 )
-from pyrit.models import SeedDataset, SeedObjective, SeedPrompt
+from pyrit.models import Modality, SeedDataset, SeedObjective, SeedPrompt
 
 
 @pytest.fixture
@@ -63,41 +73,39 @@ class TestSeedDatasetProvider:
             def dataset_name(self):
                 return "dynamic_test"
 
-            async def fetch_dataset(self):
+            async def fetch_dataset_async(self):
                 return SeedDataset(seeds=[])
 
         providers = SeedDatasetProvider.get_all_providers()
         assert "DynamicTestProvider" in providers
         assert providers["DynamicTestProvider"] == DynamicTestProvider
 
-    @pytest.mark.asyncio
     async def test_get_all_dataset_names(self):
         """Test getting all dataset names."""
         # Mock the registry to ensure deterministic results
         mock_provider_cls = MagicMock(__name__="TestProvider")
         mock_provider_instance = mock_provider_cls.return_value
         mock_provider_instance.dataset_name = "test_dataset"
-        mock_provider_instance._parse_metadata = AsyncMock(return_value=None)
+        mock_provider_instance._parse_metadata_async = AsyncMock(return_value=None)
 
         with patch.dict(SeedDatasetProvider._registry, {"TestProvider": mock_provider_cls}, clear=True):
             names = await SeedDatasetProvider.get_all_dataset_names_async()
             assert names == ["test_dataset"]
 
-    @pytest.mark.asyncio
     async def test_fetch_datasets_async(self):
         """Test fetching all datasets."""
         # Mock providers
         mock_provider1 = MagicMock(__name__="P1")
         mock_provider1.return_value.dataset_name = "d1"
-        mock_provider1.return_value._parse_metadata = AsyncMock(return_value=None)
-        mock_provider1.return_value.fetch_dataset = AsyncMock(
+        mock_provider1.return_value._parse_metadata_async = AsyncMock(return_value=None)
+        mock_provider1.return_value.fetch_dataset_async = AsyncMock(
             return_value=SeedDataset(seeds=[SeedPrompt(value="p1", data_type="text")], dataset_name="d1")
         )
 
         mock_provider2 = MagicMock(__name__="P2")
         mock_provider2.return_value.dataset_name = "d2"
-        mock_provider2.return_value._parse_metadata = AsyncMock(return_value=None)
-        mock_provider2.return_value.fetch_dataset = AsyncMock(
+        mock_provider2.return_value._parse_metadata_async = AsyncMock(return_value=None)
+        mock_provider2.return_value.fetch_dataset_async = AsyncMock(
             return_value=SeedDataset(seeds=[SeedPrompt(value="p2", data_type="text")], dataset_name="d2")
         )
 
@@ -105,40 +113,38 @@ class TestSeedDatasetProvider:
             datasets = await SeedDatasetProvider.fetch_datasets_async()
             assert len(datasets) == 2
 
-    @pytest.mark.asyncio
     async def test_fetch_datasets_async_with_filter(self):
         """Test fetching datasets with filter."""
         mock_provider1 = MagicMock(__name__="P1")
         mock_provider1.return_value.dataset_name = "d1"
-        mock_provider1.return_value._parse_metadata = AsyncMock(return_value=None)
-        mock_provider1.return_value.fetch_dataset = AsyncMock(
+        mock_provider1.return_value._parse_metadata_async = AsyncMock(return_value=None)
+        mock_provider1.return_value.fetch_dataset_async = AsyncMock(
             return_value=SeedDataset(seeds=[SeedPrompt(value="p1", data_type="text")], dataset_name="d1")
         )
 
         mock_provider2 = MagicMock(__name__="P2")
         mock_provider2.return_value.dataset_name = "d2"
-        mock_provider2.return_value._parse_metadata = AsyncMock(return_value=None)
-        mock_provider2.return_value.fetch_dataset = AsyncMock(side_effect=Exception("Should not be called"))
+        mock_provider2.return_value._parse_metadata_async = AsyncMock(return_value=None)
+        mock_provider2.return_value.fetch_dataset_async = AsyncMock(side_effect=Exception("Should not be called"))
 
         with patch.dict(SeedDatasetProvider._registry, {"P1": mock_provider1, "P2": mock_provider2}, clear=True):
             datasets = await SeedDatasetProvider.fetch_datasets_async(dataset_names=["d1"])
             assert len(datasets) == 1
             assert datasets[0].dataset_name == "d1"
 
-    @pytest.mark.asyncio
     async def test_fetch_datasets_async_invalid_dataset_name(self):
         """Test that fetch_datasets_async raises ValueError for invalid dataset names."""
         mock_provider1 = MagicMock(__name__="P1")
         mock_provider1.return_value.dataset_name = "d1"
-        mock_provider1.return_value._parse_metadata = AsyncMock(return_value=None)
-        mock_provider1.return_value.fetch_dataset = AsyncMock(
+        mock_provider1.return_value._parse_metadata_async = AsyncMock(return_value=None)
+        mock_provider1.return_value.fetch_dataset_async = AsyncMock(
             return_value=SeedDataset(seeds=[SeedPrompt(value="p1", data_type="text")], dataset_name="d1")
         )
 
         mock_provider2 = MagicMock(__name__="P2")
         mock_provider2.return_value.dataset_name = "d2"
-        mock_provider2.return_value._parse_metadata = AsyncMock(return_value=None)
-        mock_provider2.return_value.fetch_dataset = AsyncMock(
+        mock_provider2.return_value._parse_metadata_async = AsyncMock(return_value=None)
+        mock_provider2.return_value.fetch_dataset_async = AsyncMock(
             return_value=SeedDataset(seeds=[SeedPrompt(value="p2", data_type="text")], dataset_name="d2")
         )
 
@@ -152,16 +158,52 @@ class TestSeedDatasetProvider:
                 await SeedDatasetProvider.fetch_datasets_async(dataset_names=["d1", "invalid1", "invalid2"])
 
 
+class TestFetchDatasetAsync:
+    """Tests for fetch_dataset_async on provider subclasses."""
+
+    async def test_new_caller_does_not_warn_for_new_override(self):
+        """Calling fetch_dataset_async on a subclass does not warn."""
+
+        class NewStyleProvider(SeedDatasetProvider):
+            should_register = False
+
+            @property
+            def dataset_name(self) -> str:
+                return "new_style"
+
+            async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+                return SeedDataset(seeds=[SeedPrompt(value="x", data_type="text")], dataset_name="new_style")
+
+        provider = NewStyleProvider()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            dataset = await provider.fetch_dataset_async()
+        assert isinstance(dataset, SeedDataset)
+
+    async def test_no_override_raises_not_implemented(self):
+        """Subclass that overrides neither method raises NotImplementedError on fetch."""
+
+        class NoOverrideProvider(SeedDatasetProvider):
+            should_register = False
+
+            @property
+            def dataset_name(self) -> str:
+                return "no_override"
+
+        provider = NoOverrideProvider()
+        with pytest.raises(NotImplementedError, match="must implement fetch_dataset_async"):
+            await provider.fetch_dataset_async()
+
+
 class TestHarmBenchDataset:
     """Test the HarmBench dataset loader."""
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset(self, mock_harmbench_data):
         """Test fetching HarmBench dataset."""
         loader = _HarmBenchDataset()
 
         with patch.object(loader, "_fetch_from_url", return_value=mock_harmbench_data):
-            dataset = await loader.fetch_dataset()
+            dataset = await loader.fetch_dataset_async()
 
             assert isinstance(dataset, SeedDataset)
             assert len(dataset.seeds) == 2
@@ -172,7 +214,7 @@ class TestHarmBenchDataset:
             assert first_prompt.value == "Test harmful behavior 1"
             assert first_prompt.data_type == "text"
             assert first_prompt.dataset_name == "harmbench"
-            assert first_prompt.harm_categories == ["chemical_biological"]
+            assert first_prompt.harm_categories == ["CBRN"]
             assert first_prompt.name == "HarmBench Examples"
 
     def test_dataset_name(self):
@@ -180,7 +222,6 @@ class TestHarmBenchDataset:
         loader = _HarmBenchDataset()
         assert loader.dataset_name == "harmbench"
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_missing_keys(self):
         """Test that missing required keys raise ValueError."""
         loader = _HarmBenchDataset()
@@ -188,9 +229,8 @@ class TestHarmBenchDataset:
 
         with patch.object(loader, "_fetch_from_url", return_value=invalid_data):
             with pytest.raises(ValueError, match="Missing keys in example"):
-                await loader.fetch_dataset()
+                await loader.fetch_dataset_async()
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_with_custom_source(self, mock_harmbench_data):
         """Test fetching with custom source URL."""
         loader = _HarmBenchDataset(
@@ -199,7 +239,7 @@ class TestHarmBenchDataset:
         )
 
         with patch.object(loader, "_fetch_from_url", return_value=mock_harmbench_data) as mock_fetch:
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
             assert len(dataset.seeds) == 2
             mock_fetch.assert_called_once()
@@ -212,13 +252,12 @@ class TestHarmBenchDataset:
 class TestDarkBenchDataset:
     """Test the DarkBench dataset loader."""
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset(self, mock_darkbench_data):
         """Test fetching DarkBench dataset."""
         loader = _DarkBenchDataset()
 
-        with patch.object(loader, "_fetch_from_huggingface", return_value=mock_darkbench_data):
-            dataset = await loader.fetch_dataset()
+        with patch.object(loader, "_fetch_from_huggingface_async", return_value=mock_darkbench_data):
+            dataset = await loader.fetch_dataset_async()
 
             assert isinstance(dataset, SeedDataset)
             assert len(dataset.seeds) == 2
@@ -229,50 +268,68 @@ class TestDarkBenchDataset:
             assert first_prompt.value == "Test dark pattern example 1"
             assert first_prompt.data_type == "text"
             assert first_prompt.dataset_name == "dark_bench"
-            assert first_prompt.harm_categories == ["manipulative_design"]
+            assert first_prompt.harm_categories == []
+            assert first_prompt.metadata["deceptive_pattern"] == "manipulative_design"
 
     def test_dataset_name(self):
         """Test dataset_name property."""
         loader = _DarkBenchDataset()
         assert loader.dataset_name == "dark_bench"
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_with_custom_config(self, mock_darkbench_data):
         """Test fetching with custom HuggingFace config."""
         loader = _DarkBenchDataset(
             dataset_name="custom/darkbench",
             config="custom_config",
-            split="test",
         )
 
-        with patch.object(loader, "_fetch_from_huggingface", return_value=mock_darkbench_data) as mock_fetch:
-            dataset = await loader.fetch_dataset()
+        with patch.object(loader, "_fetch_from_huggingface_async", return_value=mock_darkbench_data) as mock_fetch:
+            dataset = await loader.fetch_dataset_async()
 
             assert len(dataset.seeds) == 2
             mock_fetch.assert_called_once()
             call_kwargs = mock_fetch.call_args.kwargs
             assert call_kwargs["dataset_name"] == "custom/darkbench"
             assert call_kwargs["config"] == "custom_config"
-            assert call_kwargs["split"] == "test"
+            # split is hardcoded at the call site since upstream apart/darkbench
+            # publishes only the "train" split
+            assert call_kwargs["split"] == "train"
 
 
 class TestMetadataParsingRemote:
     """Test metadata parsing and filter matching for remote providers."""
 
-    @pytest.mark.asyncio
     async def test_parse_metadata_from_class_attrs(self):
-        """Test _parse_metadata correctly extracts class-level metadata attributes."""
+        """Test _parse_metadata_async correctly extracts class-level metadata attributes."""
         loader = _HarmBenchDataset()
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         assert metadata.tags == {"default", "safety"}
-        assert metadata.size == {"large"}
+        assert metadata.size == {"medium"}
         assert metadata.modalities == {"text"}
         assert metadata.harm_categories == {"cybercrime", "illegal", "harmful", "chemical_biological", "harassment"}
         # source_type is not declared as a class attribute on HarmBench;
         # load_time inherits the UNINITIALIZED default from SeedDatasetProvider base class
         assert metadata.source_type is None
         assert metadata.load_time == {SeedDatasetLoadTime.UNINITIALIZED}
+
+    async def test_promptintel_tagged_as_feed(self):
+        """PromptIntel is a live API, so it carries the 'feed' tag and matches a feed filter."""
+        metadata = await _PromptIntelDataset()._parse_metadata_async()
+        assert metadata is not None
+        assert "feed" in metadata.tags
+        assert SeedDatasetProvider._match_filter_to_metadata(
+            metadata=metadata, dataset_filter=SeedDatasetFilter(tags={"feed"})
+        )
+
+    async def test_agent_threat_rules_not_tagged_as_feed(self):
+        """ATR is pinned to a commit by default, so it is intentionally not a feed."""
+        metadata = await _AgentThreatRulesDataset()._parse_metadata_async()
+        assert metadata is not None
+        assert "feed" not in metadata.tags
+        assert not SeedDatasetProvider._match_filter_to_metadata(
+            metadata=metadata, dataset_filter=SeedDatasetFilter(tags={"feed"})
+        )
 
     def test_all_tag(self):
         """Filter with tags={'all'} matches any metadata."""
@@ -356,17 +413,86 @@ class TestMetadataParsingRemote:
         filters = SeedDatasetFilter()
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_no_metadata(self):
         """Provider without metadata is skipped when filters are applied."""
         mock_provider_cls = MagicMock(__name__="NoProv")
         mock_provider_instance = mock_provider_cls.return_value
         mock_provider_instance.dataset_name = "no_metadata"
-        mock_provider_instance._parse_metadata = AsyncMock(return_value=None)
+        mock_provider_instance._parse_metadata_async = AsyncMock(return_value=None)
 
         with patch.dict(SeedDatasetProvider._registry, {"NoProv": mock_provider_cls}, clear=True):
             names = await SeedDatasetProvider.get_all_dataset_names_async(filters=SeedDatasetFilter(tags={"safety"}))
             assert names == []
+
+
+def _all_registered_remote_loaders() -> list[type]:
+    """Return every concrete remote loader currently registered.
+
+    Imports the remote subpackage to trigger __init_subclass__ registration,
+    then filters _RemoteDatasetLoader subclasses out of SeedDatasetProvider's
+    registry. Excludes test fixtures (defined under tests/) so the coverage
+    contract only applies to shipped loaders.
+    """
+    # Re-import to be defensive when collected in isolation; importlib caches it.
+    import pyrit.datasets.seed_datasets.remote  # noqa: F401
+
+    return [
+        cls
+        for cls in SeedDatasetProvider._registry.values()
+        if issubclass(cls, _RemoteDatasetLoader)
+        and cls is not _RemoteDatasetLoader
+        and cls.__module__.startswith("pyrit.")
+    ]
+
+
+_VALID_SIZES = set(typing.get_args(SeedDatasetSizeCategory))
+_VALID_MODALITIES = {m.value for m in Modality}
+
+
+class TestRemoteLoaderMetadataCoverage:
+    """Enforce that every remote loader declares class-level metadata.
+
+    Walks the auto-registered remote loaders and asserts each one exposes the
+    fields that drive ``SeedDatasetFilter`` discovery (tags, size, modalities)
+    so new loaders can't silently regress the catalog.
+    """
+
+    @pytest.mark.parametrize(
+        "loader_cls",
+        _all_registered_remote_loaders(),
+        ids=lambda cls: cls.__name__,
+    )
+    async def test_loader_declares_complete_metadata(self, loader_cls):
+        """Every concrete remote loader must declare tags, size, and modalities."""
+        loader = loader_cls()
+        metadata = await loader._parse_metadata_async()
+
+        assert metadata is not None, (
+            f"{loader_cls.__name__} has no class-level metadata. Declare `tags`, "
+            "`size`, and `modalities` per pyrit/datasets/seed_datasets/seed_metadata.py."
+        )
+
+        assert metadata.tags, f"{loader_cls.__name__} is missing class-level `tags`."
+        assert metadata.size, f"{loader_cls.__name__} is missing class-level `size`."
+        assert metadata.modalities, f"{loader_cls.__name__} is missing class-level `modalities`."
+
+        unknown_tags = metadata.tags - RECOMMENDED_TAGS
+        assert not unknown_tags, (
+            f"{loader_cls.__name__} declares non-canonical tag(s) {sorted(unknown_tags)}. "
+            f"Use the vocabulary in seed_metadata.RECOMMENDED_TAGS or extend it deliberately."
+        )
+
+        invalid_sizes = metadata.size - _VALID_SIZES
+        assert not invalid_sizes, (
+            f"{loader_cls.__name__} declares invalid size(s) {sorted(invalid_sizes)}. "
+            f"Valid sizes: {sorted(_VALID_SIZES)}."
+        )
+
+        invalid_modalities = metadata.modalities - _VALID_MODALITIES
+        assert not invalid_modalities, (
+            f"{loader_cls.__name__} declares invalid modality(ies) {sorted(invalid_modalities)}. "
+            f"Use pyrit.models.Modality members. Valid values: {sorted(_VALID_MODALITIES)}."
+        )
 
 
 class TestStrictMatchFiltering:
@@ -538,12 +664,11 @@ class TestFilterValidation:
         )
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_all_includes_datasets_without_metadata(self):
         """'all' in get_all_dataset_names_async includes providers with no metadata."""
         mock_cls = MagicMock(__name__="BareProv")
         mock_cls.return_value.dataset_name = "bare"
-        mock_cls.return_value._parse_metadata = AsyncMock(return_value=None)
+        mock_cls.return_value._parse_metadata_async = AsyncMock(return_value=None)
 
         with patch.dict(SeedDatasetProvider._registry, {"Bare": mock_cls}, clear=True):
             # Without 'all', bare datasets are skipped
@@ -558,12 +683,11 @@ class TestFilterValidation:
             )
             assert names == ["bare"]
 
-    @pytest.mark.asyncio
     async def test_all_skips_match_filter_call(self):
         """'all' in get_all_dataset_names_async doesn't call _match_filter at all."""
         mock_cls = MagicMock(__name__="Prov")
         mock_cls.return_value.dataset_name = "test"
-        mock_cls.return_value._parse_metadata = AsyncMock(return_value=None)
+        mock_cls.return_value._parse_metadata_async = AsyncMock(return_value=None)
 
         with (
             patch.dict(SeedDatasetProvider._registry, {"P": mock_cls}, clear=True),
@@ -591,9 +715,8 @@ class TestMetadataParsingLocal:
         path.write_text(content)
         return path
 
-    @pytest.mark.asyncio
     async def test_parse_metadata_extracts_fields(self, tmp_path):
-        """Test _parse_metadata correctly extracts metadata fields from YAML."""
+        """Test _parse_metadata_async correctly extracts metadata fields from YAML."""
         yaml_path = self._write_yaml(
             tmp_path,
             "test",
@@ -607,11 +730,10 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         assert metadata.harm_categories == {"violence"}
 
-    @pytest.mark.asyncio
     async def test_all_tag(self, tmp_path):
         """Filter with tags={'all'} matches regardless of metadata types."""
         yaml_path = self._write_yaml(
@@ -629,12 +751,11 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         filters = SeedDatasetFilter(tags={"all"})
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_tags(self, tmp_path):
         """YAML produces tags as list; set intersection in _match_filter expects a set."""
         yaml_path = self._write_yaml(
@@ -651,12 +772,11 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         filters = SeedDatasetFilter(tags={"safety"})
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_sizes(self, tmp_path):
         """YAML produces size as string; _match_filter compares against enum values."""
         yaml_path = self._write_yaml(
@@ -671,12 +791,11 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         filters = SeedDatasetFilter(size={"large"})
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_modalities(self, tmp_path):
         """YAML produces modalities as list of strings; _match_filter uses enum values."""
         yaml_path = self._write_yaml(
@@ -692,12 +811,11 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         filters = SeedDatasetFilter(modalities={"text"})
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_sources(self, tmp_path):
         """YAML produces source_type as string; _match_filter compares against enum values."""
         yaml_path = self._write_yaml(
@@ -712,12 +830,11 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         filters = SeedDatasetFilter(source_type={"remote"})
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_ranks(self, tmp_path):
         """YAML produces load_time as string; _match_filter compares against enum values."""
         yaml_path = self._write_yaml(
@@ -732,12 +849,11 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         filters = SeedDatasetFilter(load_time={SeedDatasetLoadTime.FAST})
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_harm_categories(self, tmp_path):
         """Both YAML and filter use list[str], so intersection works correctly."""
         yaml_path = self._write_yaml(
@@ -754,12 +870,11 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         filters = SeedDatasetFilter(harm_categories={"violence"})
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_empty_filter(self, tmp_path):
         """Empty filter matches everything."""
         yaml_path = self._write_yaml(
@@ -775,14 +890,13 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is not None
         filters = SeedDatasetFilter()
         assert SeedDatasetProvider._match_filter_to_metadata(metadata=metadata, dataset_filter=filters)
 
-    @pytest.mark.asyncio
     async def test_no_metadata(self, tmp_path):
-        """YAML without any metadata fields returns None from _parse_metadata."""
+        """YAML without any metadata fields returns None from _parse_metadata_async."""
         yaml_path = self._write_yaml(
             tmp_path,
             "test",
@@ -794,14 +908,14 @@ class TestMetadataParsingLocal:
             """),
         )
         loader = self._make_loader(yaml_path)
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         assert metadata is None
 
 
 class TestLocalDatasetMetadataCollisions:
     """
     Regression tests that scan every real .prompt file under seed_datasets/local
-    to verify _parse_metadata does not crash from field-name collisions between
+    to verify _parse_metadata_async does not crash from field-name collisions between
     the YAML schema and SeedDatasetMetadata.
 
     The previous `source` field collision (URLs parsed as SeedDatasetSourceType)
@@ -815,14 +929,13 @@ class TestLocalDatasetMetadataCollisions:
         return sorted(local_dir.glob("**/*.prompt")) + sorted(local_dir.glob("**/*.yaml"))
 
     @pytest.mark.parametrize("prompt_file", _get_local_prompt_files.__func__(), ids=lambda p: p.stem)
-    @pytest.mark.asyncio
     async def test_parse_metadata_does_not_crash(self, prompt_file):
-        """_parse_metadata must not raise on any real local dataset file."""
+        """_parse_metadata_async must not raise on any real local dataset file."""
         loader = _LocalDatasetLoader.__new__(_LocalDatasetLoader)
         loader.file_path = prompt_file
         loader._dataset_name = prompt_file.stem
 
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
         # metadata can be None (no matching fields) or a valid SeedDatasetMetadata
         if metadata is not None:
             assert isinstance(metadata, SeedDatasetMetadata)

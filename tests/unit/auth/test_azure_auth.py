@@ -13,6 +13,8 @@ from pyrit.auth.azure_auth import (
     get_azure_token_provider,
     get_speech_config,
     get_speech_config_from_default_azure_credential,
+    is_azure_ml_endpoint,
+    is_azure_openai_endpoint,
 )
 
 curr_epoch_time = int(time.time())
@@ -21,7 +23,7 @@ mock_token = "fake token"
 
 def is_speechsdk_installed():
     try:
-        import azure.cognitiveservices.speech  # noqa: F401
+        import azure.cognitiveservices.speech  # type: ignore[ty:unresolved-import]  # noqa: F401
 
         return True
     except ModuleNotFoundError:
@@ -144,3 +146,96 @@ def test_get_speech_config_insufficient_info_raises_error() -> None:
     """Test get_speech_config raises ValueError with insufficient information."""
     with pytest.raises(ValueError, match="Insufficient information provided for Azure Speech service"):
         get_speech_config(resource_id=None, key=None, region="test_region")
+
+
+def test_get_access_token_from_interactive_login_returns_token():
+    from pyrit.auth.azure_auth import get_access_token_from_interactive_login
+
+    with (
+        patch("pyrit.auth.azure_auth.InteractiveBrowserCredential") as mock_cred_cls,
+        patch("pyrit.auth.azure_auth.get_bearer_token_provider") as mock_provider_fn,
+    ):
+        mock_provider_fn.return_value = MagicMock(return_value="test_token_123")
+        result = get_access_token_from_interactive_login(scope="https://cognitiveservices.azure.com/.default")
+
+    assert result == "test_token_123"
+    mock_cred_cls.assert_called_once()
+    mock_provider_fn.assert_called_once()
+
+
+def test_get_access_token_from_interactive_login_propagates_exception():
+    from pyrit.auth.azure_auth import get_access_token_from_interactive_login
+
+    with (
+        patch("pyrit.auth.azure_auth.InteractiveBrowserCredential"),
+        patch("pyrit.auth.azure_auth.get_bearer_token_provider", side_effect=ValueError("auth failed")),
+    ):
+        with pytest.raises(ValueError, match="auth failed"):
+            get_access_token_from_interactive_login(scope="https://test.scope")
+
+
+class TestIsAzureOpenAIEndpoint:
+    """Strict hostname-suffix validation for Azure OpenAI / AI Foundry endpoints."""
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "https://my-resource.openai.azure.com",
+            "https://my-resource.openai.azure.com/openai/deployments/gpt-4o",
+            "https://my-project.ai.azure.com",
+            "https://my-project.services.ai.azure.com",
+            "https://my-resource.cognitiveservices.azure.com",
+            "https://MY-RESOURCE.OpenAI.Azure.Com",  # case-insensitive
+        ],
+    )
+    def test_recognises_valid_endpoints(self, endpoint: str) -> None:
+        assert is_azure_openai_endpoint(endpoint) is True
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            None,
+            "",
+            "not a url",
+            "https://openai.com",
+            "https://api.openai.com/v1",
+            "https://my-resource.notazure.com",
+            # Suffix-injection / spoofing: the real suffix is only a substring, not the host suffix.
+            "https://evil.openai.azure.com.attacker.com",
+            "https://openai.azure.com.attacker.com",
+            "https://myopenai.azure.com",  # ".azure.com" without a recognised leading label
+        ],
+    )
+    def test_rejects_invalid_or_spoofed_endpoints(self, endpoint: str | None) -> None:
+        assert is_azure_openai_endpoint(endpoint) is False
+
+    def test_does_not_match_azure_ml_endpoint(self) -> None:
+        assert is_azure_openai_endpoint("https://my-endpoint.inference.ml.azure.com") is False
+
+
+class TestIsAzureMLEndpoint:
+    """Strict hostname-suffix validation for Azure ML managed online endpoints."""
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "https://my-endpoint.inference.ml.azure.com",
+            "https://my-endpoint.inference.ml.azure.com/score",
+            "https://MY-ENDPOINT.Inference.ML.Azure.Com",  # case-insensitive
+        ],
+    )
+    def test_recognises_valid_endpoints(self, endpoint: str) -> None:
+        assert is_azure_ml_endpoint(endpoint) is True
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            None,
+            "",
+            "https://my-resource.openai.azure.com",
+            "https://my-endpoint.inference.ml.azure.com.attacker.com",  # suffix injection
+            "https://myinference.ml.azure.com",
+        ],
+    )
+    def test_rejects_invalid_or_spoofed_endpoints(self, endpoint: str | None) -> None:
+        assert is_azure_ml_endpoint(endpoint) is False

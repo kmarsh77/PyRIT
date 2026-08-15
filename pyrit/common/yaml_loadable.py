@@ -3,7 +3,7 @@
 
 import abc
 from pathlib import Path
-from typing import TypeVar, Union
+from typing import TypeVar
 
 import yaml
 
@@ -18,7 +18,7 @@ class YamlLoadable(abc.ABC):  # noqa: B024
     """
 
     @classmethod
-    def from_yaml_file(cls: type[T], file: Union[Path | str]) -> T:
+    def from_yaml_file(cls: type[T], file: Path | str) -> T:
         """
         Create a new object from a YAML file.
 
@@ -44,5 +44,5 @@ class YamlLoadable(abc.ABC):  # noqa: B024
         # If this class provides a from_dict factory, use it;
         # otherwise, just instantiate directly with **yaml_data
         if hasattr(cls, "from_dict") and callable(getattr(cls, "from_dict")):  # noqa: B009
-            return cls.from_dict(yaml_data)  # type: ignore[attr-defined, no-any-return]
+            return cls.from_dict(yaml_data)  # type: ignore[ty:call-non-callable]
         return cls(**yaml_data)

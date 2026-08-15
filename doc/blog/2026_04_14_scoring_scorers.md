@@ -47,6 +47,9 @@ The `eval_hash` allows us to easily look up metrics associated with a specific s
 
 Here is a diagram of the full end-to-end process of our scorer evaluation framework.
 
+:::{div}
+:class: col-page-right
+
 ```{mermaid}
 flowchart TB
  subgraph INPUT["📁 Input: Human-Labeled CSV Datasets"]
@@ -97,6 +100,7 @@ flowchart TB
     FIND --> PRINTER
     FIND --> BEST
 ```
+:::
 
 1. It begins by loading human-labeled datasets from saved `.csv` files, parsing version metadata, and creating a `HumanLabeledDataset` object that can be ingested by our evaluation methods.
 2. The second step builds the scorer evaluation identifier from the scoring configuration; we can optionally check whether an entry already exists in our JSONL-formatted metrics registry by checking the eval hash.
@@ -108,7 +112,7 @@ flowchart TB
 
 There are a few different ways to view metrics for specific scoring configurations.
 
-**Directly on a scorer instance:** Call `get_scorer_metrics()` on any scorer object to look up its saved metrics (if they exist), as described at the bottom of the [Scorer Evaluation Identifier](#scorer-evaluation-identifier) section above. See the [scorer metrics notebook](../code/scoring/8_scorer_metrics.ipynb) to try it yourself!
+**Directly on a scorer instance:** Call `get_scorer_metrics()` on any scorer object to look up its saved metrics (if they exist), as described at the bottom of the [Scorer Evaluation Identifier](#scorer-evaluation-identifier) section above. See the [scorer metrics notebook](../code/scoring/4_scorer_metrics.ipynb) to try it yourself!
 
 **Automatically in scenario output:** When running scenarios and printing results (i.e., in [pyrit_scan](../scanner/1_pyrit_scan.ipynb) or [pyrit_shell](../scanner/2_pyrit_shell.md)), metrics are automatically fetched and displayed alongside the attack results (as long as the scoring configuration has been evaluated before):
 
@@ -132,7 +136,7 @@ The framework checks the JSONL registry for an existing entry matching the score
 
 ![alt text](2026_04_14_running_evaluation.png)
 
-For the full walkthrough — including running objective and harm evaluations, configuring custom datasets, and comparing results — give the [scorer metrics notebook](../code/scoring/8_scorer_metrics.ipynb) a try!
+For the full walkthrough — including running objective and harm evaluations, configuring custom datasets, and comparing results — give the [scorer metrics notebook](../code/scoring/4_scorer_metrics.ipynb) a try!
 
 ## Closing Thoughts
 

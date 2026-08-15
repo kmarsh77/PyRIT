@@ -9,9 +9,9 @@ managed identity, security response headers, and no embedded secrets.
 ```
 Users ──→ MSAL PKCE auth ──→ Container App
                                                        ↓
-                                                 MSAL PKCE auth
+                                          Graph-backed authentication
                                                        ↓
-                                              FastAPI JWT middleware
+                                       Microsoft Graph /me + memberships
                                                        ↓
                                               User-Assigned MI
                                         ↙     ↙     ↓      ↘      ↘
@@ -58,12 +58,16 @@ Production is opt-in via `deployToProd: true`.
 
 - **Authentication**: [MSAL](https://learn.microsoft.com/en-us/entra/msal/)
   [PKCE](https://oauth.net/2/pkce/) on the frontend (`@azure/msal-browser`) +
-  FastAPI JWT middleware on the backend. Validates Bearer tokens against Entra ID
-  JWKS. PKCE (public client) — no client secrets or certificates needed.
+  Microsoft Graph-backed middleware on the backend. The frontend sends a delegated
+  Graph token, and the backend authenticates it through Graph `/me`. PKCE (public
+  client) requires no client secrets or certificates.
 - **Authorization**: Entra group check via `allowedGroupObjectIds` param. Requires
-  `groupMembershipClaims: "ApplicationGroup"` + optional claims + each security group
-  assigned to the enterprise app (see Prerequisites §3). If no group restriction is
-  set, all authenticated users pass.
+  delegated Graph `User.Read`; the backend calls `/me/checkMemberGroups` and compares
+  the returned transitive memberships with the configured group IDs. Each security
+  group must also be assigned to the enterprise app (see Prerequisites §3). Authenticated
+  deployments require at least one allowed group and fail to start without one.
+  Successful identity and membership results are cached in-process for 60 seconds by
+  token digest to reduce Graph latency and throttling; bearer tokens are never cached.
 - **Identity**: User-assigned managed identity (UAMI) — created before the container
   app so [RBAC](https://learn.microsoft.com/en-us/azure/role-based-access-control/)
   roles are active before the first revision starts. `AZURE_CLIENT_ID` is set to the
@@ -83,8 +87,13 @@ Production is opt-in via `deployToProd: true`.
   Permissions-Policy, and Cache-Control (`no-store` on API routes). Swagger/OpenAPI
   disabled in production.
 - **Data**: Azure SQL with managed identity authentication (no passwords)
-- **Secrets**: Key Vault with RBAC (existing vault, secrets referenced via
-  [ACA](https://learn.microsoft.com/en-us/azure/container-apps/) secretRef)
+- **Secrets**: The `.env` file contents are passed inline to the Container App
+  as a `@secure()` Bicep parameter (`envFileContents`) and stored encrypted in
+  the Container App's secret store. Azure Container Apps is not on Key Vault's
+  "trusted services" list, so a locked-down KV would block runtime secret
+  resolution — passing inline avoids that. The Key Vault is still created and
+  populated with the `.env` content as `env-global` for backup/audit, then
+  fully locked down (`publicNetworkAccess=Disabled`).
 - **Images**: Unique tags or digests required — `:latest` is detected by a soft guardrail
 - **Supply chain**: [ACR](https://learn.microsoft.com/en-us/azure/container-registry/)
   pull via managed identity RBAC (must be granted manually; see Post-Deployment §2).
@@ -156,41 +165,29 @@ az account show --query tenantId -o tsv
 >   --spa-redirect-uris "https://$FQDN"
 > ```
 
-**Expose an API scope** (required — the frontend requests `api://{clientId}/access` tokens):
+**Configure delegated Microsoft Graph access** (required):
 
-1. In Azure Portal → App registrations → your app → **Expose an API**
-2. Set the Application ID URI (accept the default `api://<client-id>`)
-3. **Add a scope**: value = `access`, admin consent display name = "Access PyRIT GUI",
-   who can consent = "Admins and users", state = Enabled
+In Azure Portal → App registrations → your app → **API permissions**:
+
+1. Select **Add a permission** → **Microsoft Graph** → **Delegated permissions**.
+2. Add `User.Read`.
+3. Grant consent according to your tenant policy. `User.Read` does not normally
+   require admin consent, but some tenants disable user consent.
+
+The frontend requests `User.Read`. The backend treats the resulting Graph access
+token as opaque and forwards it only to fixed or allowlisted Graph endpoints. Graph
+validates the token when the backend calls `/me` and `/me/checkMemberGroups`.
 
 Or via CLI:
 ```bash
-# Set application ID URI
+# Add delegated Microsoft Graph User.Read
+# Graph app ID: 00000003-0000-0000-c000-000000000000
+# User.Read delegated permission ID: e1fe6dd8-ba31-4d61-89e7-88639da4683d
 APP_OBJ_ID=$(az ad app show --id $APP_ID --query id -o tsv)
 az rest --method PATCH \
   --url "https://graph.microsoft.com/v1.0/applications/$APP_OBJ_ID" \
-  --body "{\"identifierUris\": [\"api://$APP_ID\"]}"
-
-# Add the 'access' scope (generate a unique GUID for the scope ID)
-SCOPE_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
-az rest --method PATCH \
-  --url "https://graph.microsoft.com/v1.0/applications/$APP_OBJ_ID" \
-  --body "{\"api\":{\"oauth2PermissionScopes\":[{\"id\":\"$SCOPE_ID\",\"isEnabled\":true,\"type\":\"User\",\"value\":\"access\",\"adminConsentDisplayName\":\"Access PyRIT GUI\",\"adminConsentDescription\":\"Allow access to the PyRIT GUI API\",\"userConsentDisplayName\":\"Access PyRIT GUI\",\"userConsentDescription\":\"Allow access to the PyRIT GUI API\"}]}}"
+  --body '{"requiredResourceAccess":[{"resourceAppId":"00000003-0000-0000-c000-000000000000","resourceAccess":[{"id":"e1fe6dd8-ba31-4d61-89e7-88639da4683d","type":"Scope"}]}]}'
 ```
-
-**Configure group claims** for group-based authorization:
-
-```bash
-# Set groupMembershipClaims to ApplicationGroup (not SecurityGroup — the latter
-# causes groups overage for users in >200 groups, breaking token-based group checks)
-az rest --method PATCH \
-  --url "https://graph.microsoft.com/v1.0/applications/$APP_OBJ_ID" \
-  --body '{"groupMembershipClaims": "ApplicationGroup"}'
-```
-
-Then add `groups` as an optional claim for both ID tokens and access tokens:
-Azure Portal → App registrations → your app → Token configuration → Add optional
-claim → Token type: Access → check `groups` → Save. Repeat for ID token.
 
 ### 3. Entra security groups (required for group-based authorization)
 
@@ -214,8 +211,9 @@ az ad group member add --group "MyApp-Users" --member-id <user-object-id>
 az ad group member list --group "MyApp-Users" --query '[].displayName' -o tsv
 ```
 
-**IMPORTANT: Assign each group to the enterprise application.** This is required for
-`ApplicationGroup` to emit group IDs in tokens:
+**IMPORTANT: Assign each group to the enterprise application.** This enables the
+recommended `appRoleAssignmentRequired` sign-in restriction in addition to the
+backend's Graph-based group authorization:
 
 ```bash
 # Get the service principal (enterprise app) object ID
@@ -232,6 +230,10 @@ az rest --method POST \
 az ad sp update --id $SP_ID --set appRoleAssignmentRequired=true
 ```
 
+Enterprise-app assignment restricts sign-in through this SPA, but a Graph token is
+not client-bound at this backend. The configured allowed groups are therefore the
+backend's authoritative security boundary. Never deploy with an empty group list.
+
 **Nested groups**: Entra enterprise app assignment does **not** cascade to nested
 groups. If group A contains group B as a member, only direct members of A are
 considered assigned. To grant access to members of B, assign B to the enterprise
@@ -239,9 +241,9 @@ app separately and include both group IDs in `allowedGroupObjectIds`.
 
 **App roles** (optional): You can define custom app roles on the app registration
 (e.g., `MyApp.User.All`) and assign groups to specific roles instead of the
-default access role. The backend currently authorizes via the `groups` token claim,
-not `roles`, so app roles serve as organizational metadata and for
-`appRoleAssignmentRequired` gating at the IdP level.
+default access role. The backend authorizes using memberships returned by Graph,
+not token `groups` or `roles` claims, so app roles serve as organizational metadata
+and for `appRoleAssignmentRequired` gating at the IdP level.
 
 ### 4. Azure SQL server with Entra admin (existing)
 
@@ -287,11 +289,15 @@ echo "containerImage: $ACR_NAME.azurecr.io/pyrit:$COMMIT_SHA"
 > **Note**: The CI/CD pipeline handles build + push automatically. Manual push is
 > only needed for the initial bootstrap or if deploying outside the pipeline.
 
-### 6. Key Vault (existing — required)
+### 6. Key Vault (existing — required for backup/audit only)
 
 Use an existing Key Vault to avoid soft-delete/purge-protection naming conflicts
-on redeployment. The managed identity must be granted `Key Vault Secrets User` on
-the vault manually (the Bicep template does **not** create RBAC role assignments).
+on redeployment. As of the inline-secret migration, the Container App does
+**not** read secrets from Key Vault at runtime — the `.env` content is passed
+inline via the `envFileContents` Bicep parameter. The vault is still required
+because the deploy script writes the `.env` content as `env-global` for
+backup/audit, but the managed identity does **not** need `Key Vault Secrets
+User` (was previously required, no longer is).
 
 ```bash
 # Create a vault (if your org doesn't provide one)
@@ -305,9 +311,12 @@ az keyvault create \
 az keyvault show --name <vault-name> --query id -o tsv
 ```
 
-> **Note**: The vault should have `enableRbacAuthorization: true` so the managed
-> identity can be granted access. Diagnostic settings (AuditEvent logs) should be
-> configured on the vault separately by the vault owner.
+> **Note**: The vault should have `enableRbacAuthorization: true`. Diagnostic
+> settings (AuditEvent logs) should be configured separately by the vault
+> owner. The deploy script creates the vault with `defaultAction=Deny` and only
+> the deployer's IP allowlisted, then removes the IP rule and sets
+> `publicNetworkAccess=Disabled` after writing the backup secret (matches the
+> team standard for SFI/NS221 compliance — no window of unrestricted public access).
 
 ## Preview changes before deploying (recommended)
 
@@ -350,17 +359,19 @@ az deployment group create \
    ```
 
 2. **Grant managed identity RBAC** (required — the Bicep template does **not** create
-   role assignments; the app will fail to start without AcrPull and KV roles):
+   role assignments; the app will fail to start without AcrPull):
    ```bash
    MI_ID=$(az deployment group show -g <rg> -n main \
      --query properties.outputs.managedIdentityPrincipalId.value -o tsv)
 
-   # Required — app won't start without these
+   # Required — app won't start without AcrPull
    # To find acrResourceId: az acr show --name <acr-name> --query id -o tsv
    az role assignment create --assignee-object-id $MI_ID \
      --assignee-principal-type ServicePrincipal --role "AcrPull" --scope <acrResourceId>
-   az role assignment create --assignee-object-id $MI_ID \
-     --assignee-principal-type ServicePrincipal --role "Key Vault Secrets User" --scope <keyVaultResourceId>
+
+   # Note: Key Vault Secrets User is NOT required — the Container App reads
+   # its .env contents from an inline secret (envFileContents), not via a
+   # Key Vault reference.
 
    # Grant based on which services you use (scope as narrowly as possible)
    az role assignment create --assignee-object-id $MI_ID \
@@ -388,12 +399,6 @@ az deployment group create \
 4. **Manage access** — Add or remove users via Entra security groups
    (`allowedGroupObjectIds`). Each group must also be assigned to the enterprise app.
 
-5. **Set CORS origins** for production (the Bicep template does not set this):
-   ```bash
-   az containerapp update -n <appName> -g <rg> \
-     --set-env-vars "PYRIT_CORS_ORIGINS=https://$FQDN"
-   ```
-
 ## Access the GUI
 
 ```bash
@@ -412,24 +417,96 @@ needed in the container.
 
 | .pyrit_conf field | Bicep param | Env var | Notes |
 |-------------------|-------------|---------|-------|
-| `initializers` | `pyritInitializer` | `PYRIT_INITIALIZER` | Default `target airt`: `target` populates the TargetRegistry (read by the GUI); `airt` loads converter, scorer, and adversarial defaults |
+| `initializers` | `pyritInitializer` | `PYRIT_INITIALIZER` | Default `target`: `target` populates the TargetRegistry (read by the GUI);|
 | `operator` | — | Set per-user in the GUI | |
 | `operation` | — | Set per-user in the GUI | |
 
-### .env file → Key Vault secret
+### .env file → Container App inline secret
 
-The entire `.env` file is stored as a single Key Vault secret (`env-global` by
-default). The template references it via ACA secret and injects it as the
-`PYRIT_ENV_CONTENTS` env var. PyRIT parses this at startup to set all endpoint,
-model, and API key environment variables.
+The entire `.env` file is passed to the Bicep template as the `envFileContents`
+`@secure()` parameter and stored as an inline `env-file` secret on the
+Container App. The template injects it as the `PYRIT_ENV_CONTENTS` env var.
+PyRIT parses this at startup to set all endpoint, model, and API key
+environment variables. The Key Vault still receives the same content as
+`env-global` for backup/audit, but it is **not** read at runtime.
 
-To update the `.env` contents:
+To rotate the `.env` after deployment, the rotation path depends on which
+deploy path you used:
+
+**For instances deployed via `infra/deploy_instance.py`:**
+
+Use `az containerapp secret set` with the `@file` form (the file path is on
+the command line, not the secret value).
+
+> **`updated.env` is your local file** — same format as `infra/env.demo.template`
+> and the file you passed to `--env-file` during initial deployment, but with
+> the new values you want to deploy. The filename is just a convention; you
+> can name it anything.
+
+> ⚠️ **Verify the file exists before running `az`.** The CLI's `@file`
+> expansion is silent: if the path is wrong, `az` falls back to storing the
+> literal string `@./your-typo.env` as the secret value, with no error. The
+> container will then read garbage at startup.
+
 ```bash
-az keyvault secret set --vault-name <vault> --name env-global --file ~/.pyrit/.env
+# bash
+test -f ./updated.env || { echo "ERROR: ./updated.env not found"; exit 1; }
+az containerapp secret set \
+  -n copyrit-{instance-name} \
+  -g copyrit-{instance-name} \
+  --secrets "env-file=@./updated.env"
+
+# Force a new revision (per Microsoft docs, secret updates do NOT auto-restart
+# existing revisions — a revision-scoped change is required to pick them up)
+az containerapp update \
+  -n copyrit-{instance-name} \
+  -g copyrit-{instance-name} \
+  --set-env-vars "SECRET_UPDATED=$(date +%s)"
 ```
 
-> ⚠️ `PYRIT_ENV_CONTENTS` may contain API keys. Ensure application logging does
-> **not** dump environment variables or process state.
+The `updated.env` file must include the auto-injected
+`AZURE_SQL_DB_CONNECTION_STRING` and
+`AZURE_STORAGE_ACCOUNT_DB_DATA_CONTAINER_URL` values from initial deploy
+(check the KV `env-global` backup or the deploy script's log output).
+
+To keep the KV backup in sync, also run:
+```bash
+az keyvault secret set --vault-name copyrit-{instance-name}-kv \
+  --name env-global --file ./updated.env
+```
+(The KV is locked down — this needs Cloud Shell or temporary public access.)
+
+**For instances deployed via `gui-deploy.yml` (ADO pipeline):**
+
+Update the `envFileContents` SECURE variable in the relevant ADO library
+variable group (`copyrit-gui-test` or `copyrit-gui-prod`) with the new
+content, then re-run the pipeline.
+
+> ⚠️ The pipeline runs `az deployment group create`, which is incremental:
+> if only the secret value changed, no revision-scoped property changes, so
+> ACA will **not** automatically start a new revision. After the pipeline
+> succeeds, manually force a new revision so the running container picks up
+> the new secret:
+> ```bash
+> az containerapp update \
+>   -n <appName> -g <resourceGroup> \
+>   --set-env-vars "SECRET_UPDATED=$(date +%s)"
+> ```
+> Or fold this into a final pipeline step.
+
+> ⚠️ **Anti-patterns to avoid:**
+> - `az containerapp secret set --secrets "env-file=$ENV_CONTENT"` —
+>   passing the value as a literal CLI argument exposes it via `ps` while
+>   the command runs. Use the `@file` form above instead.
+> - `az containerapp secret show --secret-name env-file` — returns the full
+>   plaintext to your terminal / shell history.
+> - **Do not re-run `infra/deploy_instance.py` against an existing instance
+>   to rotate secrets.** The script's create steps (Entra app, SQL server,
+>   Key Vault, managed identity) are not idempotent and will either fail or
+>   produce duplicate Entra app registrations.
+
+> ⚠️ `PYRIT_ENV_CONTENTS` may contain API keys. Ensure application logging
+> does **not** dump environment variables or process state.
 
 Azure services (OpenAI, Content Safety, Speech) support managed identity — when
 API key env vars are not set, PyRIT auto-falls back to `DefaultAzureCredential`,
@@ -445,8 +522,10 @@ Platform, Groq, Google Gemini) require API keys in the `.env`.
 - **Log Analytics shared key**: `listKeys()` is the standard ACA pattern. The key is
   used during deployment only, not exposed to the application.
 - **Workload profiles**: Consumption tier. Defaults to 1 replica (no auto-scale).
-- **Key Vault**: Must be an existing vault. RBAC must be granted manually (see
-  Post-Deployment §2).
+- **Key Vault**: Must be an existing vault. Used for `.env` content backup/audit
+  only — the runtime secret comes from an inline ACA secret. RBAC for AcrPull is
+  still granted manually (see Post-Deployment §2); Key Vault Secrets User is no
+  longer required.
 - **OpenTelemetry**: When `enableOtel=true`, configure the agent post-deploy:
   ```bash
   AI_CONN=$(az deployment group show -g <rg> -n main \

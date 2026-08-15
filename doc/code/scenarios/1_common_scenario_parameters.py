@@ -1,0 +1,184 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.18.1
+# ---
+
+# %% [markdown]
+# # Common Scenario Parameters
+#
+# This guide covers the key parameters for configuring scenarios programmatically: datasets,
+# techniques, baseline execution, and custom scorers. All examples use `RedTeamAgent` but the
+# patterns apply to any scenario.
+#
+# > **Two selection axes**: *Techniques* select attack techniques (*how* attacks run — e.g., prompt
+# > sending, role play, TAP). *Datasets* select objectives (*what* is tested — e.g., harm categories,
+# > compliance topics). Use `--dataset-names` on the CLI to filter by content category.
+#
+# > **Running scenarios from the command line?** See the [Scanner documentation](../../scanner/0_scanner.md).
+#
+# ## Setup
+#
+# Initialize PyRIT and create the target we want to test.
+
+# %%
+from pathlib import Path
+
+from pyrit.output import output_scenario_async
+from pyrit.registry import TargetRegistry
+from pyrit.scenario.foundry import FoundryTechnique, RedTeamAgent
+from pyrit.setup import initialize_from_config_async
+
+await initialize_from_config_async(config_path=Path("../../scanner/pyrit_conf.yaml"))  # type: ignore
+
+objective_target = TargetRegistry.get_registry_singleton().instances.get("openai_chat")
+# %% [markdown]
+# ## Dataset Configuration
+#
+# `DatasetAttackConfiguration` controls which prompts (objectives) are sent to the target.
+# The simplest approach uses `dataset_names` to load datasets by name from memory.
+# By default, `RedTeamAgent` loads four random objectives from HarmBench [@mazeika2024harmbench].
+
+# %%
+from pyrit.scenario import DatasetAttackConfiguration
+
+dataset_config = DatasetAttackConfiguration(dataset_names=["harmbench"], max_dataset_size=2)
+
+# %% [markdown]
+# For more control, use `SeedDatasetProvider` to fetch datasets and pass explicit `seed_groups`.
+# This is useful when you need to filter, combine, or inspect the prompts before running.
+
+# %%
+from pyrit.datasets import SeedDatasetProvider
+from pyrit.models import SeedGroup
+
+datasets = await SeedDatasetProvider.fetch_datasets_async(dataset_names=["harmbench"])  # type: ignore
+seed_groups: list[SeedGroup] = datasets[0].seed_groups  # type: ignore
+
+# Pass explicit seed_groups instead of dataset_names
+dataset_config = DatasetAttackConfiguration(seed_groups=seed_groups, max_dataset_size=2)
+
+# %% [markdown]
+# ## Technique Selection and Composition
+#
+# `FoundryTechnique` is an enum that defines which attack techniques the scenario runs. There are
+# three ways to specify techniques:
+#
+# **Individual techniques** — a single converter or multi-turn attack:
+
+# %%
+single_technique = [FoundryTechnique.Base64]
+
+# %% [markdown]
+# **Aggregate techniques** — tag-based groups that expand to all matching techniques. For example,
+# `EASY` expands to all techniques tagged as easy (Base64, Binary, CharSwap, etc.):
+
+# %%
+aggregate_technique = [FoundryTechnique.EASY]
+
+# %% [markdown]
+# **Composite techniques** — pair an attack with one or more converters using `FoundryComposite`.
+# For example, to run Crescendo with Base64 encoding applied:
+
+# %%
+from pyrit.scenario.foundry import FoundryComposite
+
+composite_technique = [FoundryComposite(attack=FoundryTechnique.Crescendo, converters=[FoundryTechnique.Base64])]
+
+# %% [markdown]
+# You can mix all three types in a single list:
+
+# %%
+scenario_techniques = [
+    FoundryTechnique.Base64,
+    FoundryTechnique.Binary,
+    FoundryComposite(attack=FoundryTechnique.Crescendo, converters=[FoundryTechnique.Caesar]),
+]
+
+# %% [markdown]
+# ## Baseline Execution
+#
+# The baseline sends each objective directly to the target without any converters or multi-turn
+# techniques. It is included automatically when `include_baseline=True` (the default for
+# scenarios that support a baseline). This is useful for:
+#
+# - **Measuring default defenses** — how does the target respond to unmodified harmful prompts?
+# - **Establishing comparison points** — compare baseline refusal rates against attack-enhanced runs
+# - **Calculating attack lift** — how much does each technique improve over the baseline?
+
+# %%
+baseline_scenario = RedTeamAgent()
+baseline_scenario.set_params_from_args(  # type: ignore
+    args={
+        "objective_target": objective_target,
+        "scenario_techniques": None,  # Uses default techniques; baseline is prepended automatically
+        "dataset_config": dataset_config,
+    }
+)
+await baseline_scenario.initialize_async()  # type: ignore
+baseline_result = await baseline_scenario.run_async()  # type: ignore
+await output_scenario_async(baseline_result)  # type: ignore [top-level-await]
+
+# %% [markdown]
+# ### Sorting the Per-Group Breakdown by Success Rate
+#
+# By default, the **Per-Group Breakdown** lists groups in the order they were executed. The baseline
+# run above produces a row for every default technique, which makes it hard to spot the most
+# successful ones at a glance. Pass `sort_groups_by_success_rate=True` to `output_scenario_async` to
+# re-render the same result with the highest success rates at the top (groups with equal rates keep
+# their original relative order):
+
+# %%
+await output_scenario_async(baseline_result, sort_groups_by_success_rate=True)
+
+# %% [markdown]
+# To disable the automatic baseline entirely (e.g., when you only want attack techniques with no
+# comparison), set `include_baseline=False` in the run params:
+#
+# ```python
+# scenario = RedTeamAgent()
+# scenario.set_params_from_args(
+#     args={
+#         "objective_target": objective_target,
+#         "scenario_techniques": [FoundryTechnique.Base64],
+#         "include_baseline": False,
+#     }
+# )
+# await scenario.initialize_async()
+# ```
+
+# %% [markdown]
+# ## Custom Scorers
+#
+# By default, `RedTeamAgent` uses a composite scorer with Azure Content Filter and SelfAsk Refusal
+# scorers. You can override this by passing your own `AttackScoringConfig` with a custom
+# `objective_scorer`.
+#
+# For example, to use an inverted refusal scorer (where "True" means the target refused):
+
+# %%
+from pyrit.executor.attack import AttackScoringConfig
+from pyrit.prompt_target import OpenAIChatTarget
+from pyrit.score import SelfAskRefusalScorer, TrueFalseInverterScorer
+
+refusal_scorer = SelfAskRefusalScorer(chat_target=OpenAIChatTarget())
+inverted_scorer = TrueFalseInverterScorer(scorer=refusal_scorer)
+
+custom_scenario = RedTeamAgent(
+    attack_scoring_config=AttackScoringConfig(objective_scorer=inverted_scorer),
+)
+custom_scenario.set_params_from_args(  # type: ignore
+    args={
+        "objective_target": objective_target,
+        "scenario_techniques": [FoundryTechnique.Base64],
+        "dataset_config": dataset_config,
+    }
+)
+await custom_scenario.initialize_async()  # type: ignore
+
+custom_result = await custom_scenario.run_async()  # type: ignore
+await output_scenario_async(custom_result)

@@ -2,9 +2,24 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import ChatWindow from "./ChatWindow";
-import { Message, TargetInfo, TargetInstance } from "../../types";
+import { makeTarget } from "@/test-utils/targetFixtures";
+import { Message, TargetCapabilities, TargetInfo, TargetInstance } from "../../types";
 import { attacksApi, convertersApi } from "../../services/api";
 import * as messageMapper from "../../utils/messageMapper";
+
+const buildCapabilities = (
+  overrides: Partial<TargetCapabilities> = {}
+): TargetCapabilities => ({
+  supports_multi_turn: true,
+  supports_multi_message_pieces: false,
+  supports_json_schema: false,
+  supports_json_output: false,
+  supports_editable_history: false,
+  supports_system_prompt: false,
+  supported_input_modalities: [],
+  supported_output_modalities: [],
+  ...overrides,
+});
 
 // Fluent UI Combobox portal interactions are slow in JSDOM under full test load
 jest.setTimeout(60000);
@@ -39,17 +54,31 @@ jest.mock("../../utils/messageMapper", () => ({
 const mockedAttacksApi = attacksApi as jest.Mocked<typeof attacksApi>;
 const mockedConvertersApi = convertersApi as jest.Mocked<typeof convertersApi>;
 const mockedMapper = messageMapper as jest.Mocked<typeof messageMapper>;
+const MARKDOWN_PREFERENCE_STORAGE_KEY = "pyrit.chatMarkdownMode";
 
 const TestWrapper: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => <FluentProvider theme={webLightTheme}>{children}</FluentProvider>;
 
-const mockTarget: TargetInstance = {
+function mockMatchMedia(matchesNarrowScreen: boolean): void {
+  (window.matchMedia as jest.Mock).mockImplementation((query: string) => ({
+    matches: matchesNarrowScreen && query === "(max-width: 600px)",
+    media: query,
+    onchange: null,
+    addListener: jest.fn(),
+    removeListener: jest.fn(),
+    addEventListener: jest.fn(),
+    removeEventListener: jest.fn(),
+    dispatchEvent: jest.fn(),
+  }));
+}
+
+const mockTarget: TargetInstance = makeTarget({
   target_registry_name: "openai_chat_1",
   target_type: "OpenAIChatTarget",
   endpoint: "https://api.openai.com",
   model_name: "gpt-4",
-};
+});
 
 // ---------------------------------------------------------------------------
 // Helpers to build mock backend responses
@@ -62,9 +91,9 @@ function makeTextResponse(text: string) {
         {
           turn_number: 1,
           role: "assistant",
-          pieces: [
+          message_pieces: [
             {
-              piece_id: "p-resp",
+              id: "p-resp",
               original_value_data_type: "text",
               converted_value_data_type: "text",
               original_value: text,
@@ -87,9 +116,9 @@ function makeImageResponse() {
         {
           turn_number: 1,
           role: "assistant",
-          pieces: [
+          message_pieces: [
             {
-              piece_id: "p-img",
+              id: "p-img",
               original_value_data_type: "text",
               converted_value_data_type: "image_path",
               original_value: "generated image",
@@ -113,9 +142,9 @@ function makeAudioResponse() {
         {
           turn_number: 1,
           role: "assistant",
-          pieces: [
+          message_pieces: [
             {
-              piece_id: "p-aud",
+              id: "p-aud",
               original_value_data_type: "text",
               converted_value_data_type: "audio_path",
               original_value: "spoken text",
@@ -139,9 +168,9 @@ function makeVideoResponse() {
         {
           turn_number: 1,
           role: "assistant",
-          pieces: [
+          message_pieces: [
             {
-              piece_id: "p-vid",
+              id: "p-vid",
               original_value_data_type: "text",
               converted_value_data_type: "video_path",
               original_value: "generated video",
@@ -165,9 +194,9 @@ function makeMultiModalResponse() {
         {
           turn_number: 1,
           role: "assistant",
-          pieces: [
+          message_pieces: [
             {
-              piece_id: "p-text",
+              id: "p-text",
               original_value_data_type: "text",
               converted_value_data_type: "text",
               original_value: "Here is the result:",
@@ -176,7 +205,7 @@ function makeMultiModalResponse() {
               response_error: "none",
             },
             {
-              piece_id: "p-img2",
+              id: "p-img2",
               original_value_data_type: "text",
               converted_value_data_type: "image_path",
               original_value: "image content",
@@ -200,9 +229,9 @@ function makeErrorResponse(errorType: string, description: string) {
         {
           turn_number: 1,
           role: "assistant",
-          pieces: [
+          message_pieces: [
             {
-              piece_id: "p-err",
+              id: "p-err",
               original_value_data_type: "text",
               converted_value_data_type: "text",
               original_value: "",
@@ -247,6 +276,8 @@ describe("ChatWindow Integration", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    window.localStorage.clear();
+    mockMatchMedia(false);
     // Default: panel API returns empty conversations
     mockedAttacksApi.getConversations.mockResolvedValue({
       conversations: [],
@@ -263,6 +294,10 @@ describe("ChatWindow Integration", () => {
     });
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   // -----------------------------------------------------------------------
   // Basic rendering
   // -----------------------------------------------------------------------
@@ -274,9 +309,117 @@ describe("ChatWindow Integration", () => {
       </TestWrapper>
     );
 
-    expect(screen.getByText("PyRIT Attack")).toBeInTheDocument();
-    expect(screen.getByText("New Attack")).toBeInTheDocument();
+    // The ribbon no longer shows the "PyRIT Attack" prefix; the target
+    // badge stands on its own as the leftmost element.
+    expect(screen.getByRole("heading", { level: 1, name: "Chat" })).toBeInTheDocument();
+    expect(screen.queryByText("PyRIT Attack")).not.toBeInTheDocument();
+    expect(screen.getByTestId("target-badge")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /new attack/i })).toBeInTheDocument();
     expect(screen.getByRole("textbox")).toBeInTheDocument();
+  });
+
+  it("defaults to raw mode when no Markdown preference is stored", () => {
+    render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} />
+      </TestWrapper>
+    );
+
+    expect(screen.getByRole("switch", { name: /markdown/i })).not.toBeChecked();
+    expect(window.localStorage.getItem(MARKDOWN_PREFERENCE_STORAGE_KEY)).toBeNull();
+  });
+
+  it("persists explicit Markdown and raw choices across remounts", async () => {
+    const user = userEvent.setup();
+    const firstRender = render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} />
+      </TestWrapper>
+    );
+
+    const toggle = screen.getByRole("switch", { name: /markdown/i });
+    expect(toggle).not.toBeChecked();
+
+    await user.click(toggle);
+    expect(toggle).toBeChecked();
+    expect(window.localStorage.getItem(MARKDOWN_PREFERENCE_STORAGE_KEY)).toBe("markdown");
+
+    firstRender.unmount();
+    const secondRender = render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} />
+      </TestWrapper>
+    );
+    const remountedToggle = screen.getByRole("switch", { name: /markdown/i });
+    expect(remountedToggle).toBeChecked();
+
+    await user.click(remountedToggle);
+    expect(remountedToggle).not.toBeChecked();
+    expect(window.localStorage.getItem(MARKDOWN_PREFERENCE_STORAGE_KEY)).toBe("raw");
+
+    secondRender.unmount();
+    render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} />
+      </TestWrapper>
+    );
+    expect(screen.getByRole("switch", { name: /markdown/i })).not.toBeChecked();
+  });
+
+  it("initializes Markdown mode from stored preference", () => {
+    window.localStorage.setItem(MARKDOWN_PREFERENCE_STORAGE_KEY, "markdown");
+
+    render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} />
+      </TestWrapper>
+    );
+
+    expect(screen.getByRole("switch", { name: /markdown/i })).toBeChecked();
+  });
+
+  it("falls back to raw mode for an invalid stored preference", () => {
+    window.localStorage.setItem(MARKDOWN_PREFERENCE_STORAGE_KEY, "invalid");
+
+    render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} />
+      </TestWrapper>
+    );
+
+    expect(screen.getByRole("switch", { name: /markdown/i })).not.toBeChecked();
+  });
+
+  it("falls back to raw mode when localStorage is unavailable during initialization", () => {
+    jest.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new DOMException("Access denied", "SecurityError");
+    });
+
+    expect(() => {
+      render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} />
+        </TestWrapper>
+      );
+    }).not.toThrow();
+    expect(screen.getByRole("switch", { name: /markdown/i })).not.toBeChecked();
+  });
+
+  it("keeps the in-memory choice when localStorage is unavailable during persistence", async () => {
+    const user = userEvent.setup();
+    jest.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+
+    render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} />
+      </TestWrapper>
+    );
+
+    const toggle = screen.getByRole("switch", { name: /markdown/i });
+    await user.click(toggle);
+    expect(toggle).toBeChecked();
   });
 
   it("should display existing messages", async () => {
@@ -307,8 +450,13 @@ describe("ChatWindow Integration", () => {
       </TestWrapper>
     );
 
-    expect(screen.getByText(/OpenAIChatTarget/)).toBeInTheDocument();
-    expect(screen.getByText(/gpt-4/)).toBeInTheDocument();
+    // The target badge is the leftmost element. Its visible label
+    // includes the type and model. The same strings also appear in the
+    // tooltip body, so we query the badge specifically.
+    const badge = screen.getByTestId("target-badge");
+    expect(badge).toHaveTextContent(/OpenAIChatTarget/);
+    expect(badge).toHaveTextContent(/gpt-4/);
+    expect(badge).toHaveAttribute("aria-label", expect.stringContaining(mockTarget.target_registry_name));
   });
 
   it("should show no-target message when target is null", () => {
@@ -359,6 +507,79 @@ describe("ChatWindow Integration", () => {
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 
+  it("should disable sending while routed attack metadata is loading", () => {
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          activeTarget={mockTarget}
+          isLoadingAttack
+        />
+      </TestWrapper>
+    );
+
+    expect(screen.getByTestId("chat-input")).toBeDisabled();
+  });
+
+  it("should keep an unverifiable historical target read-only and retryable", async () => {
+    const user = userEvent.setup();
+    const onRetryTargetResolution = jest.fn();
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: "Historical response",
+        timestamp: "2026-01-01T00:00:00Z",
+      },
+    ];
+    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockedAttacksApi.getConversations.mockResolvedValue({
+      attack_result_id: "ar-unverifiable",
+      main_conversation_id: "conv-unverifiable",
+      conversations: [
+        {
+          conversation_id: "conv-unverifiable",
+          message_count: 1,
+        },
+        {
+          conversation_id: "conv-related",
+          message_count: 1,
+        },
+      ],
+    });
+    mockedMapper.backendMessagesToFrontend.mockReturnValue(messages);
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          activeTarget={null}
+          attackResultId="ar-unverifiable"
+          conversationId="conv-unverifiable"
+          activeConversationId="conv-unverifiable"
+          attackTarget={{
+            target_type: "TextTarget",
+            identifier_hash: "unverifiable-hash",
+          }}
+          targetResolutionStatus="error"
+          onRetryTargetResolution={onRetryTargetResolution}
+          relatedConversationCount={1}
+        />
+      </TestWrapper>
+    );
+
+    expect(await screen.findByTestId("target-resolution-error-banner")).toBeInTheDocument();
+    expect(await screen.findByText("Historical response")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByTestId("copy-to-input-btn-0")).toBeDisabled();
+    expect(screen.getByTestId("branch-conv-btn-0")).toBeDisabled();
+    expect(screen.getByTestId("branch-attack-btn-0")).toBeDisabled();
+    expect(await screen.findByTestId("star-btn-conv-related")).toBeDisabled();
+    expect(mockedAttacksApi.changeMainConversation).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+    expect(onRetryTargetResolution).toHaveBeenCalledTimes(1);
+  });
+
   // -----------------------------------------------------------------------
   // Target info display for various target types
   // -----------------------------------------------------------------------
@@ -366,7 +587,7 @@ describe("ChatWindow Integration", () => {
   it("should display target without model name", () => {
     const targetNoModel: TargetInstance = {
       ...mockTarget,
-      model_name: null,
+      identifier: { ...mockTarget.identifier, model_name: null },
     };
 
     render(
@@ -375,8 +596,9 @@ describe("ChatWindow Integration", () => {
       </TestWrapper>
     );
 
-    expect(screen.getByText(/OpenAIChatTarget/)).toBeInTheDocument();
-    expect(screen.queryByText(/gpt/)).not.toBeInTheDocument();
+    const badge = screen.getByTestId("target-badge");
+    expect(badge).toHaveTextContent(/OpenAIChatTarget/);
+    expect(badge).not.toHaveTextContent(/gpt/);
   });
 
   // -----------------------------------------------------------------------
@@ -442,6 +664,285 @@ describe("ChatWindow Integration", () => {
     // Messages should appear in the DOM
     await waitFor(() => {
       expect(screen.getByText("Hello back!")).toBeInTheDocument();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // System prompt (system_prompt) wiring
+  // -----------------------------------------------------------------------
+
+  describe("system prompt", () => {
+    const supportedTarget: TargetInstance = {
+      ...mockTarget,
+      capabilities: buildCapabilities({ supports_system_prompt: true }),
+    };
+
+    function primeSendMocks() {
+      mockedMapper.buildMessagePieces.mockResolvedValue([
+        { data_type: "text", original_value: "Hello" },
+      ]);
+      mockedAttacksApi.createAttack.mockResolvedValue({
+        attack_result_id: "ar-sys",
+        conversation_id: "conv-sys",
+        created_at: "2026-01-01T00:00:00Z",
+      });
+      mockedAttacksApi.addMessage.mockResolvedValue(
+        makeTextResponse("Hi") as never
+      );
+      mockedMapper.backendMessagesToFrontend.mockReturnValue([
+        { role: "assistant", content: "Hi", timestamp: "2026-01-01T00:00:01Z" },
+      ]);
+    }
+
+    it("renders the system prompt toggle for a new conversation", () => {
+      render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={supportedTarget} />
+        </TestWrapper>
+      );
+
+      expect(
+        screen.getByRole("button", { name: /system prompt/i })
+      ).toBeInTheDocument();
+    });
+
+    it("hides the system prompt toggle once an attack exists", async () => {
+      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
+
+      render(
+        <TestWrapper>
+          <ChatWindow
+            {...defaultProps}
+            activeTarget={supportedTarget}
+            attackResultId="ar-existing"
+            conversationId="conv-existing"
+            activeConversationId="conv-existing"
+          />
+        </TestWrapper>
+      );
+
+      await waitFor(() => {
+        expect(screen.queryByTestId("loading-state")).not.toBeInTheDocument();
+      });
+      expect(
+        screen.queryByRole("button", { name: /system prompt/i })
+      ).not.toBeInTheDocument();
+    });
+
+    it("renders a system prompt banner when the loaded conversation has a system message", async () => {
+      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockedMapper.backendMessagesToFrontend.mockReturnValue([
+        { role: "system", content: "You are a pirate.", timestamp: "2026-01-01T00:00:00Z" },
+        { role: "user", content: "Ahoy", timestamp: "2026-01-01T00:00:01Z" },
+      ]);
+
+      render(
+        <TestWrapper>
+          <ChatWindow
+            {...defaultProps}
+            activeTarget={supportedTarget}
+            attackResultId="ar-existing"
+            conversationId="conv-existing"
+            activeConversationId="conv-existing"
+          />
+        </TestWrapper>
+      );
+
+      expect(await screen.findByTestId("system-prompt-banner")).toBeInTheDocument();
+      expect(screen.getByText("You are a pirate.")).toBeInTheDocument();
+    });
+
+    it("forwards the typed system prompt when the target supports it", async () => {
+      const user = userEvent.setup();
+      primeSendMocks();
+
+      render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={supportedTarget} />
+        </TestWrapper>
+      );
+
+      await user.click(screen.getByRole("button", { name: /system prompt/i }));
+      await user.type(
+        screen.getByRole("textbox", { name: /system prompt/i }),
+        "You are helpful"
+      );
+      await user.type(screen.getByPlaceholderText("Type prompt here"), "Hello");
+      await user.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() => {
+        expect(mockedAttacksApi.createAttack).toHaveBeenCalledWith(
+          expect.objectContaining({ system_prompt: "You are helpful" })
+        );
+      });
+    });
+
+    it("omits the system prompt when the target does not support it", async () => {
+      const user = userEvent.setup();
+      primeSendMocks();
+
+      render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={mockTarget} />
+        </TestWrapper>
+      );
+
+      await user.type(screen.getByPlaceholderText("Type prompt here"), "Hello");
+      await user.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() => {
+        expect(mockedAttacksApi.createAttack).toHaveBeenCalled();
+      });
+      const createArgs = mockedAttacksApi.createAttack.mock.calls[0][0];
+      expect(createArgs.system_prompt).toBeUndefined();
+    });
+
+    it("disables the toggle and drops the prompt for an explicitly unsupported target", async () => {
+      const user = userEvent.setup();
+      primeSendMocks();
+
+      const unsupportedTarget: TargetInstance = {
+        ...mockTarget,
+        capabilities: buildCapabilities({ supports_system_prompt: false }),
+      };
+
+      render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={unsupportedTarget} />
+        </TestWrapper>
+      );
+
+      expect(
+        screen.getByRole("button", { name: /system prompt/i })
+      ).toBeDisabled();
+
+      await user.type(screen.getByPlaceholderText("Type prompt here"), "Hello");
+      await user.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() => {
+        expect(mockedAttacksApi.createAttack).toHaveBeenCalled();
+      });
+      const createArgs = mockedAttacksApi.createAttack.mock.calls[0][0];
+      expect(createArgs.system_prompt).toBeUndefined();
+    });
+
+    it("omits the system prompt when left blank on a supporting target", async () => {
+      const user = userEvent.setup();
+      primeSendMocks();
+
+      render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={supportedTarget} />
+        </TestWrapper>
+      );
+
+      await user.type(screen.getByPlaceholderText("Type prompt here"), "Hello");
+      await user.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() => {
+        expect(mockedAttacksApi.createAttack).toHaveBeenCalled();
+      });
+      const createArgs = mockedAttacksApi.createAttack.mock.calls[0][0];
+      expect(createArgs.system_prompt).toBeUndefined();
+    });
+
+    it("clears a retained system prompt when switching to an unsupported target", async () => {
+      const user = userEvent.setup();
+      primeSendMocks();
+
+      const supportedA: TargetInstance = {
+        ...mockTarget,
+        target_registry_name: "supports_a",
+        capabilities: buildCapabilities({ supports_system_prompt: true }),
+      };
+      const unsupportedB: TargetInstance = {
+        ...mockTarget,
+        target_registry_name: "no_support_b",
+        capabilities: buildCapabilities({ supports_system_prompt: false }),
+      };
+      const supportedC: TargetInstance = {
+        ...mockTarget,
+        target_registry_name: "supports_c",
+        capabilities: buildCapabilities({ supports_system_prompt: true }),
+      };
+
+      const { rerender } = render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={supportedA} />
+        </TestWrapper>
+      );
+
+      await user.click(screen.getByRole("button", { name: /system prompt/i }));
+      await user.type(
+        screen.getByRole("textbox", { name: /system prompt/i }),
+        "You are helpful"
+      );
+
+      // Switch to an unsupported target (should clear), then to another
+      // supporting one so the cleared value is observable on send.
+      rerender(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={unsupportedB} />
+        </TestWrapper>
+      );
+      rerender(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={supportedC} />
+        </TestWrapper>
+      );
+
+      await user.type(screen.getByPlaceholderText("Type prompt here"), "Hello");
+      await user.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() => {
+        expect(mockedAttacksApi.createAttack).toHaveBeenCalled();
+      });
+      const createArgs = mockedAttacksApi.createAttack.mock.calls[0][0];
+      expect(createArgs.system_prompt).toBeUndefined();
+    });
+
+    it("preserves the system prompt across supporting targets", async () => {
+      const user = userEvent.setup();
+      primeSendMocks();
+
+      const supportedA: TargetInstance = {
+        ...mockTarget,
+        target_registry_name: "supports_a",
+        capabilities: buildCapabilities({ supports_system_prompt: true }),
+      };
+      const supportedB: TargetInstance = {
+        ...mockTarget,
+        target_registry_name: "supports_b",
+        capabilities: buildCapabilities({ supports_system_prompt: true }),
+      };
+
+      const { rerender } = render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={supportedA} />
+        </TestWrapper>
+      );
+
+      await user.click(screen.getByRole("button", { name: /system prompt/i }));
+      await user.type(
+        screen.getByRole("textbox", { name: /system prompt/i }),
+        "You are helpful"
+      );
+
+      rerender(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} activeTarget={supportedB} />
+        </TestWrapper>
+      );
+
+      await user.type(screen.getByPlaceholderText("Type prompt here"), "Hello");
+      await user.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() => {
+        expect(mockedAttacksApi.createAttack).toHaveBeenCalledWith(
+          expect.objectContaining({ system_prompt: "You are helpful" })
+        );
+      });
     });
   });
 
@@ -1224,11 +1725,11 @@ describe("ChatWindow Integration", () => {
   // -----------------------------------------------------------------------
 
   it("should show single-turn banner for single-turn target with existing user messages", async () => {
-    const singleTurnTarget: TargetInstance = {
+    const singleTurnTarget: TargetInstance = makeTarget({
       target_registry_name: "openai_image_1",
       target_type: "OpenAIImageTarget",
-      supports_multi_turn: false,
-    };
+      capabilities: buildCapabilities({ supports_multi_turn: false }),
+    });
 
     const messagesWithUser: Message[] = [
       { role: "user", content: "Generate an image", timestamp: "2026-01-01T00:00:00Z" },
@@ -1258,11 +1759,11 @@ describe("ChatWindow Integration", () => {
   });
 
   it("should not show single-turn banner for single-turn target with no messages", () => {
-    const singleTurnTarget: TargetInstance = {
+    const singleTurnTarget: TargetInstance = makeTarget({
       target_registry_name: "openai_image_1",
       target_type: "OpenAIImageTarget",
-      supports_multi_turn: false,
-    };
+      capabilities: buildCapabilities({ supports_multi_turn: false }),
+    });
 
     render(
       <TestWrapper>
@@ -1307,11 +1808,11 @@ describe("ChatWindow Integration", () => {
   });
 
   it("should show New Conversation button in single-turn banner when conversation exists", async () => {
-    const singleTurnTarget: TargetInstance = {
+    const singleTurnTarget: TargetInstance = makeTarget({
       target_registry_name: "openai_tts_1",
       target_type: "OpenAITTSTarget",
-      supports_multi_turn: false,
-    };
+      capabilities: buildCapabilities({ supports_multi_turn: false }),
+    });
 
     const messagesWithUser: Message[] = [
       { role: "user", content: "Say hello", timestamp: "2026-01-01T00:00:00Z" },
@@ -1343,6 +1844,7 @@ describe("ChatWindow Integration", () => {
       target_type: "AzureOpenAIChatTarget",
       endpoint: "https://azure.openai.com",
       model_name: "gpt-4o",
+      identifier_hash: "different-target-hash",
     };
 
     render(
@@ -1361,9 +1863,10 @@ describe("ChatWindow Integration", () => {
 
   it("should not show cross-target banner when attackTarget matches activeTarget", () => {
     const sameTarget: TargetInfo = {
-      target_type: mockTarget.target_type,
-      endpoint: mockTarget.endpoint,
-      model_name: mockTarget.model_name,
+      target_type: mockTarget.identifier.class_name,
+      endpoint: mockTarget.identifier.endpoint,
+      model_name: mockTarget.identifier.model_name,
+      identifier_hash: mockTarget.identifier.hash,
     };
 
     render(
@@ -1378,6 +1881,76 @@ describe("ChatWindow Integration", () => {
     );
 
     expect(screen.queryByTestId("cross-target-banner")).not.toBeInTheDocument();
+  });
+
+  it("should keep a historical Round Robin attack writable when the identifier hash matches", () => {
+    const roundRobinTarget = makeTarget({
+      target_registry_name: "round-robin",
+      target_type: "RoundRobinTarget",
+      endpoint: null,
+      model_name: null,
+      identifier_hash: "round-robin-hash",
+      inner_targets: [
+        { target_registry_name: "inner-a", model_name: "e2e-dummy-model" },
+        { target_registry_name: "inner-b", model_name: "e2e-dummy-model" },
+      ],
+    });
+    const historicalTarget: TargetInfo = {
+      target_type: "RoundRobinTarget",
+      endpoint: null,
+      model_name: null,
+      identifier_hash: "round-robin-hash",
+    };
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          activeTarget={roundRobinTarget}
+          attackResultId="ar-round-robin"
+          conversationId="conv-round-robin"
+          attackTarget={historicalTarget}
+        />
+      </TestWrapper>
+    );
+
+    expect(screen.queryByTestId("cross-target-banner")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-input")).toBeEnabled();
+  });
+
+  it("should lock a historical Round Robin attack when the composite identifier hash differs", () => {
+    const roundRobinTarget = makeTarget({
+      target_registry_name: "round-robin",
+      target_type: "RoundRobinTarget",
+      endpoint: null,
+      model_name: null,
+      identifier_hash: "active-round-robin-hash",
+      inner_targets: [
+        { target_registry_name: "inner-a", model_name: "e2e-dummy-model" },
+        { target_registry_name: "inner-b", model_name: "e2e-dummy-model" },
+      ],
+    });
+    const historicalTarget: TargetInfo = {
+      target_type: "RoundRobinTarget",
+      endpoint: null,
+      model_name: null,
+      identifier_hash: "different-round-robin-hash",
+    };
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          activeTarget={roundRobinTarget}
+          attackResultId="ar-round-robin"
+          conversationId="conv-round-robin"
+          attackTarget={historicalTarget}
+        />
+      </TestWrapper>
+    );
+
+    expect(screen.getByTestId("cross-target-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
   });
 
   it("should auto-open conversation panel when relatedConversationCount > 0", async () => {
@@ -1406,6 +1979,12 @@ describe("ChatWindow Integration", () => {
     await waitFor(() => {
       expect(screen.getByTestId("conversation-panel")).toBeInTheDocument();
     });
+    expect(
+      screen.getByRole("complementary", { name: "Attack Conversations" })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Attack Conversations" })
+    ).not.toBeInTheDocument();
   });
 
   it("should not auto-open conversation panel when relatedConversationCount is 0", () => {
@@ -1467,6 +2046,61 @@ describe("ChatWindow Integration", () => {
     });
   });
 
+  it("should keep the mobile drawer closed until requested and restore focus after Escape", async () => {
+    const user = userEvent.setup();
+    mockMatchMedia(true);
+    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockedAttacksApi.getConversations.mockResolvedValue({
+      main_conversation_id: "conv-mobile",
+      conversations: [
+        {
+          conversation_id: "conv-mobile",
+          is_main: true,
+          message_count: 1,
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+    mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="ar-mobile"
+          conversationId="conv-mobile"
+          activeConversationId="conv-mobile"
+          relatedConversationCount={1}
+        />
+      </TestWrapper>
+    );
+
+    const toggleButton = screen.getByRole("button", {
+      name: "Toggle conversations panel",
+    });
+    expect(
+      screen.queryByRole("dialog", { name: "Attack Conversations" })
+    ).not.toBeInTheDocument();
+    expect(toggleButton).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(toggleButton);
+
+    expect(
+      await screen.findByRole("dialog", { name: "Attack Conversations" })
+    ).toBeInTheDocument();
+    expect(toggleButton).toHaveAttribute("aria-expanded", "true");
+
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Attack Conversations" })
+      ).not.toBeInTheDocument();
+    });
+    expect(toggleButton).toHaveAttribute("aria-expanded", "false");
+    expect(toggleButton).toHaveFocus();
+  });
+
   it("should open conversation panel when copying to new conversation", async () => {
     const mockMessages: Message[] = [
       { role: "user", content: "hello", data_type: "text" },
@@ -1520,11 +2154,11 @@ describe("ChatWindow Integration", () => {
       conversation_id: "new-conv-from-new",
     });
 
-    const singleTurnTarget: TargetInstance = {
+    const singleTurnTarget: TargetInstance = makeTarget({
       target_registry_name: "openai_image_1",
       target_type: "OpenAIImageTarget",
-      supports_multi_turn: false,
-    };
+      capabilities: buildCapabilities({ supports_multi_turn: false }),
+    });
 
     const messagesWithUser: Message[] = [
       { role: "user", content: "Generate an image", timestamp: "2026-01-01T00:00:00Z" },
@@ -2116,6 +2750,26 @@ describe("ChatWindow Integration", () => {
     });
   });
 
+  it("should expose the conversations panel toggle via aria-label", () => {
+    // Regression guard: the toggle button is icon-only and previously relied
+    // on aria-label without a visible tooltip; assert both are wired up so
+    // the button is reachable by accessible name (catches regression to
+    // missing aria-label).
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="ar-aria-toggle"
+          conversationId="conv-aria-toggle"
+          activeConversationId="conv-aria-toggle"
+        />
+      </TestWrapper>
+    );
+
+    const toggleBtn = screen.getByRole("button", { name: /toggle conversations panel/i });
+    expect(toggleBtn).toBe(screen.getByTestId("toggle-panel-btn"));
+  });
+
   it("should toggle converter panel when convert button is clicked", async () => {
     render(
       <TestWrapper>
@@ -2204,9 +2858,9 @@ describe("ChatWindow Integration", () => {
           parameters: [
             {
               name: "encoding_func",
-              type_name: "Literal['b64encode', 'urlsafe_b64encode']",
+              type_name: "str",
               required: false,
-              default_value: "b64encode",
+              default: "b64encode",
               choices: ["b64encode", "urlsafe_b64encode"],
             },
           ],
@@ -2543,6 +3197,362 @@ describe("ChatWindow Integration", () => {
     await userEvent.click(screen.getByTestId("toggle-converter-panel-btn"));
     await waitFor(() => {
       expect(screen.getByTestId("converter-panel")).toBeInTheDocument();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Text → File converter flow (e.g. PDFConverter)
+  // -----------------------------------------------------------------------
+
+  it("should render converted-file chip and synthesize file attachment when a text→file converter is used", async () => {
+    mockedConvertersApi.listConverterCatalog.mockResolvedValue({
+      items: [
+        {
+          converter_type: "PDFConverter",
+          supported_input_types: ["text"],
+          supported_output_types: ["binary_path"],
+          parameters: [],
+        },
+      ],
+    });
+    mockedConvertersApi.createConverter.mockResolvedValue({
+      converter_id: "conv-pdf",
+      converter_type: "PDFConverter",
+    });
+    mockedConvertersApi.previewConversion.mockResolvedValue({
+      converted_value: "/tmp/results/report.pdf",
+      converted_value_data_type: "binary_path",
+    });
+    mockedAttacksApi.createAttack.mockResolvedValue({
+      attack_result_id: "ar-pdf",
+      conversation_id: "conv-pdf-flow",
+      created_at: "2026-01-01T00:00:00Z",
+    } as never);
+    // Keep addMessage pending so the optimistic user message (with the
+    // synthesized file attachment) remains in the DOM for assertion.
+    mockedAttacksApi.addMessage.mockImplementation(
+      () => new Promise(() => {}) as never
+    );
+    mockedMapper.buildMessagePieces.mockResolvedValue([
+      { piece_type: "text", original_value: "make a pdf" } as never,
+    ]);
+    mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
+
+    render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} conversationId={null} />
+      </TestWrapper>
+    );
+
+    // 1. Type input
+    const chatInput = screen.getByTestId("chat-input");
+    await userEvent.type(chatInput, "make a pdf");
+
+    // 2. Open converter panel and select PDFConverter
+    await userEvent.click(screen.getByTestId("toggle-converter-panel-btn"));
+    const combobox = screen.getByRole("combobox");
+    await userEvent.click(combobox);
+    const option = await screen.findByRole("option", { name: /PDFConverter/ });
+    await userEvent.click(option);
+
+    // 3. text→file converters do not auto-preview; click Preview explicitly
+    await waitFor(() => {
+      expect(screen.getByTestId("converter-preview-btn")).toBeInTheDocument();
+    });
+    await userEvent.click(screen.getByTestId("converter-preview-btn"));
+    await waitFor(() => {
+      expect(screen.getByTestId("converter-preview-result")).toBeInTheDocument();
+    });
+
+    // 4. Use the converted value — populates pieceConversions['text'] with binary_path output
+    await userEvent.click(screen.getByTestId("use-converted-btn"));
+
+    // 5. The file chip should appear in the input area (covers convertedFileChip IIFE)
+    const chip = await screen.findByTestId("converted-file-chip");
+    expect(chip).toHaveTextContent("report.pdf");
+    const openLink = screen.getByTestId("converted-file-open");
+    expect(openLink).toHaveAttribute(
+      "href",
+      expect.stringContaining(encodeURIComponent("/tmp/results/report.pdf"))
+    );
+
+    // 6. Send — covers handleSend's text→file branch (buildMediaUrl /
+    //    dataTypeToAttachmentKind / basenameFromValue) which synthesizes a
+    //    file attachment on the optimistic user message.
+    const sendBtn = screen.getByTestId("send-message-btn");
+    await waitFor(() => expect(sendBtn).toBeEnabled());
+    await userEvent.click(sendBtn);
+
+    await waitFor(() => {
+      expect(mockedAttacksApi.createAttack).toHaveBeenCalled();
+    });
+
+    // The optimistic user bubble carries the synthesized file attachment.
+    // MessageList renders the file attachment with a unique testid we can target.
+    const attachmentOpen = await screen.findByTestId("attachment-open-0-0");
+    expect(attachmentOpen).toHaveAttribute(
+      "href",
+      expect.stringContaining(encodeURIComponent("/tmp/results/report.pdf"))
+    );
+  });
+
+  it("should auto-clear a stale text→text conversion when the typed text diverges from the original", async () => {
+    mockedConvertersApi.listConverterCatalog.mockResolvedValue({
+      items: [
+        {
+          converter_type: "Base64Converter",
+          supported_input_types: ["text"],
+          supported_output_types: ["text"],
+          parameters: [],
+        },
+      ],
+    });
+    mockedConvertersApi.createConverter.mockResolvedValue({
+      converter_id: "conv-b64-stale",
+      converter_type: "Base64Converter",
+    });
+    mockedConvertersApi.previewConversion.mockResolvedValue({
+      converted_value: "aGVsbG8=",
+      converted_value_data_type: "text",
+    });
+
+    render(
+      <TestWrapper>
+        <ChatWindow {...defaultProps} conversationId={null} />
+      </TestWrapper>
+    );
+
+    const chatInput = screen.getByTestId("chat-input");
+    await userEvent.type(chatInput, "hello");
+
+    await userEvent.click(screen.getByTestId("toggle-converter-panel-btn"));
+    const combobox = screen.getByRole("combobox");
+    await userEvent.click(combobox);
+    const option = await screen.findByRole("option", { name: /Base64Converter/ });
+    await userEvent.click(option);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("converter-preview-btn")).toBeInTheDocument();
+    });
+    await userEvent.click(screen.getByTestId("converter-preview-btn"));
+    await waitFor(() => {
+      expect(screen.getByTestId("converter-preview-result")).toBeInTheDocument();
+    });
+    await userEvent.click(screen.getByTestId("use-converted-btn"));
+
+    // The converted text row now exists (originalValue captured = "hello")
+    await waitFor(() => {
+      expect(screen.getByTestId("converted-value-input")).toBeInTheDocument();
+    });
+
+    // Type more — originalValue no longer matches chatInputText, so the
+    // auto-clear effect must drop pieceConversions['text'].
+    await userEvent.type(chatInput, " world");
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("converted-value-input")).not.toBeInTheDocument();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Conversation export
+  // -----------------------------------------------------------------------
+
+  describe("conversation export", () => {
+    function spyOnDownloadAnchor(): { clickSpy: jest.Mock; getDownloadAnchor: () => HTMLAnchorElement } {
+      const anchors: HTMLAnchorElement[] = [];
+      const clickSpy = jest.fn();
+      const origCreateElement = document.createElement.bind(document);
+      jest.spyOn(document, "createElement").mockImplementation((tag: string) => {
+        const el = origCreateElement(tag);
+        if (tag === "a") {
+          anchors.push(el as HTMLAnchorElement);
+          jest.spyOn(el as HTMLAnchorElement, "click").mockImplementation(clickSpy);
+        }
+        return el;
+      });
+      return { clickSpy, getDownloadAnchor: () => anchors.find((a) => a.download) as HTMLAnchorElement };
+    }
+
+    async function renderWithLoadedConversation(
+      props: Record<string, unknown> = {}
+    ): Promise<void> {
+      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
+      render(
+        <TestWrapper>
+          <ChatWindow
+            {...defaultProps}
+            attackResultId="ar-1"
+            conversationId="conv-1"
+            activeConversationId="conv-1"
+            {...props}
+          />
+        </TestWrapper>
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /export conversation/i })).toBeEnabled()
+      );
+    }
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it("shows an export button in the ribbon", () => {
+      render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} />
+        </TestWrapper>
+      );
+      expect(screen.getByRole("button", { name: /export conversation/i })).toBeInTheDocument();
+    });
+
+    it("disables export when the conversation is empty", () => {
+      render(
+        <TestWrapper>
+          <ChatWindow {...defaultProps} />
+        </TestWrapper>
+      );
+      expect(screen.getByRole("button", { name: /export conversation/i })).toBeDisabled();
+    });
+
+    it("enables export once a conversation with messages loads", async () => {
+      await renderWithLoadedConversation();
+      expect(screen.getByRole("button", { name: /export conversation/i })).toBeEnabled();
+    });
+
+    it("keeps export disabled when every loaded message is a loading placeholder", async () => {
+      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockedMapper.backendMessagesToFrontend.mockReturnValue([
+        { role: "assistant", content: "", timestamp: "2026-07-22T02:30:07.000Z", isLoading: true },
+      ]);
+      render(
+        <TestWrapper>
+          <ChatWindow
+            {...defaultProps}
+            attackResultId="ar-1"
+            conversationId="conv-1"
+            activeConversationId="conv-1"
+          />
+        </TestWrapper>
+      );
+      await waitFor(() => {
+        expect(mockedMapper.backendMessagesToFrontend).toHaveBeenCalled();
+      });
+      // length > 0 but no non-loading message => export must stay disabled.
+      expect(screen.getByRole("button", { name: /export conversation/i })).toBeDisabled();
+    });
+
+    it("keeps export disabled when the only loaded message is a system prompt", async () => {
+      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockedMapper.backendMessagesToFrontend.mockReturnValue([
+        { role: "system", content: "You are a pirate.", timestamp: "2026-07-22T02:30:07.000Z" },
+      ]);
+      render(
+        <TestWrapper>
+          <ChatWindow
+            {...defaultProps}
+            attackResultId="ar-1"
+            conversationId="conv-1"
+            activeConversationId="conv-1"
+          />
+        </TestWrapper>
+      );
+      await waitFor(() => {
+        expect(mockedMapper.backendMessagesToFrontend).toHaveBeenCalled();
+      });
+      // A lone system prompt renders only in the banner, so export stays disabled.
+      expect(screen.getByRole("button", { name: /export conversation/i })).toBeDisabled();
+    });
+
+    it("opens a menu with Markdown and JSON options", async () => {
+      const user = userEvent.setup();
+      await renderWithLoadedConversation();
+
+      await user.click(screen.getByRole("button", { name: /export conversation/i }));
+
+      expect(screen.getByRole("menuitem", { name: /export as markdown/i })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: /export as json/i })).toBeInTheDocument();
+    });
+
+    it("downloads Markdown when the Markdown option is clicked", async () => {
+      const user = userEvent.setup();
+      await renderWithLoadedConversation();
+      const { clickSpy, getDownloadAnchor } = spyOnDownloadAnchor();
+
+      await user.click(screen.getByRole("button", { name: /export conversation/i }));
+      await user.click(screen.getByRole("menuitem", { name: /export as markdown/i }));
+
+      const blob = (URL.createObjectURL as jest.Mock).mock.calls[0][0] as Blob;
+      expect(blob.type).toBe("text/markdown;charset=utf-8");
+      expect(getDownloadAnchor().download).toMatch(/^copyrit-conversation-conv-1-.*\.md$/);
+      expect(clickSpy).toHaveBeenCalled();
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-url");
+    });
+
+    it("downloads JSON without re-fetching the conversation", async () => {
+      const user = userEvent.setup();
+      await renderWithLoadedConversation();
+      const callsBefore = mockedAttacksApi.getMessages.mock.calls.length;
+      const { getDownloadAnchor } = spyOnDownloadAnchor();
+
+      await user.click(screen.getByRole("button", { name: /export conversation/i }));
+      await user.click(screen.getByRole("menuitem", { name: /export as json/i }));
+
+      const blob = (URL.createObjectURL as jest.Mock).mock.calls[0][0] as Blob;
+      expect(blob.type).toBe("application/json;charset=utf-8");
+      expect(getDownloadAnchor().download).toMatch(/^copyrit-conversation-conv-1-.*\.json$/);
+      // WYSIWYG: export serializes in-state messages and makes no extra API call.
+      expect(mockedAttacksApi.getMessages.mock.calls.length).toBe(callsBefore);
+    });
+
+    it("exports the displayed conversation id when it differs from the attack's main conversation", async () => {
+      const user = userEvent.setup();
+      // Viewing a branch: activeConversationId (displayed) differs from the
+      // attack's main conversationId. handleExport uses activeConversationId.
+      await renderWithLoadedConversation({
+        conversationId: "conv-main",
+        activeConversationId: "conv-branch",
+      });
+      const { getDownloadAnchor } = spyOnDownloadAnchor();
+
+      await user.click(screen.getByRole("button", { name: /export conversation/i }));
+      await user.click(screen.getByRole("menuitem", { name: /export as markdown/i }));
+
+      expect(getDownloadAnchor().download).toMatch(/^copyrit-conversation-conv-branch-.*\.md$/);
+    });
+
+    it("allows exporting a read-only historical conversation", async () => {
+      const user = userEvent.setup();
+      // Operator lock: the loaded attack belongs to a different operator.
+      await renderWithLoadedConversation({ attackLabels: { operator: "someone-else" } });
+      const { clickSpy } = spyOnDownloadAnchor();
+
+      const exportButton = screen.getByRole("button", { name: /export conversation/i });
+      expect(exportButton).toBeEnabled();
+
+      await user.click(exportButton);
+      await user.click(screen.getByRole("menuitem", { name: /export as markdown/i }));
+
+      expect(clickSpy).toHaveBeenCalled();
+    });
+
+    it("disables export while a message is being sent", async () => {
+      const user = userEvent.setup();
+      mockedMapper.buildMessagePieces.mockResolvedValue([
+        { data_type: "text", original_value: "hi" },
+      ]);
+      // addMessage never resolves, so the conversation stays in the sending state.
+      mockedAttacksApi.addMessage.mockImplementation(() => new Promise(() => {}));
+      await renderWithLoadedConversation();
+
+      await user.type(screen.getByRole("textbox"), "hi");
+      await user.click(screen.getByRole("button", { name: /send/i }));
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /export conversation/i })).toBeDisabled()
+      );
     });
   });
 });

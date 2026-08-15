@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import asyncio
+import inspect
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -32,7 +32,7 @@ class TestTokenProviderWrapping:
 
         result = ensure_async_token_provider(async_token_provider)
         assert result is async_token_provider
-        assert asyncio.iscoroutinefunction(result)
+        assert inspect.iscoroutinefunction(result)
 
     def test_sync_token_provider_wrapped(self):
         """Test that synchronous token providers are automatically wrapped."""
@@ -45,9 +45,8 @@ class TestTokenProviderWrapping:
         # Should return a different callable (the wrapper)
         assert result is not sync_token_provider
         assert callable(result)
-        assert asyncio.iscoroutinefunction(result)
+        assert inspect.iscoroutinefunction(result)
 
-    @pytest.mark.asyncio
     async def test_wrapped_sync_provider_returns_correct_token(self):
         """Test that wrapped synchronous token provider returns the correct token."""
 
@@ -60,7 +59,6 @@ class TestTokenProviderWrapping:
         token = await wrapped()
         assert token == "my-sync-token"
 
-    @pytest.mark.asyncio
     async def test_async_provider_returns_correct_token(self):
         """Test that async token providers work correctly."""
 
@@ -76,7 +74,6 @@ class TestTokenProviderWrapping:
         token = await result()
         assert token == "my-async-token"
 
-    @pytest.mark.asyncio
     async def test_wrapped_sync_provider_called_correctly(self):
         """Test that the wrapped sync provider calls the original function."""
         call_count = 0
@@ -114,7 +111,6 @@ class TestTokenProviderWrapping:
 class TestOpenAITargetWithTokenProviders:
     """Test OpenAITarget initialization with different token provider types."""
 
-    @pytest.mark.asyncio
     async def test_openai_target_with_sync_token_provider(self):
         """Test that OpenAIChatTarget works with synchronous token providers."""
         from pyrit.prompt_target import OpenAIChatTarget
@@ -151,13 +147,12 @@ class TestOpenAITargetWithTokenProviders:
             # The api_key should be a callable
             api_key_arg = call_kwargs["api_key"]
             assert callable(api_key_arg)
-            assert asyncio.iscoroutinefunction(api_key_arg)
+            assert inspect.iscoroutinefunction(api_key_arg)
 
             # Verify the wrapped token provider returns correct value
             token = await api_key_arg()
             assert token == "sync-token-value"
 
-    @pytest.mark.asyncio
     async def test_openai_target_with_async_token_provider(self):
         """Test that OpenAIChatTarget works with async token providers."""
         from pyrit.prompt_target import OpenAIChatTarget
@@ -187,7 +182,6 @@ class TestOpenAITargetWithTokenProviders:
             token = await api_key_arg()
             assert token == "async-token-value"
 
-    @pytest.mark.asyncio
     async def test_openai_target_with_string_api_key(self):
         """Test that OpenAIChatTarget works with string API keys."""
         from pyrit.prompt_target import OpenAIChatTarget
@@ -211,7 +205,6 @@ class TestOpenAITargetWithTokenProviders:
             assert api_key_arg == "sk-string-api-key"
             assert isinstance(api_key_arg, str)
 
-    @pytest.mark.asyncio
     async def test_azure_bearer_token_provider_integration(self):
         """Test integration with Azure bearer token provider pattern."""
         from pyrit.prompt_target import OpenAIChatTarget
@@ -241,7 +234,7 @@ class TestOpenAITargetWithTokenProviders:
             call_kwargs = mock_openai.call_args[1]
             wrapped_provider = call_kwargs["api_key"]
 
-            assert asyncio.iscoroutinefunction(wrapped_provider)
+            assert inspect.iscoroutinefunction(wrapped_provider)
 
             # Verify it returns the correct token
             token = await wrapped_provider()

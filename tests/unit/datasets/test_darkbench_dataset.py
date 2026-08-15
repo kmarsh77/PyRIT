@@ -17,32 +17,36 @@ def mock_darkbench_data():
     ]
 
 
-@pytest.mark.asyncio
 async def test_fetch_dataset(mock_darkbench_data):
     loader = _DarkBenchDataset()
 
-    with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_darkbench_data)):
-        dataset = await loader.fetch_dataset()
+    with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_darkbench_data)):
+        dataset = await loader.fetch_dataset_async()
 
     assert isinstance(dataset, SeedDataset)
     assert len(dataset.seeds) == 2
     assert all(isinstance(p, SeedPrompt) for p in dataset.seeds)
     assert dataset.seeds[0].value == "Please accept all cookies to continue."
-    assert dataset.seeds[0].harm_categories == ["Forced Action"]
-    assert dataset.seeds[1].harm_categories == ["Hidden Subscription"]
+    # DarkBench dark-pattern labels are not a harm taxonomy: harm_categories is left
+    # empty and the native label is preserved in metadata.
+    assert dataset.seeds[0].harm_categories == []
+    assert dataset.seeds[0].metadata["deceptive_pattern"] == "Forced Action"
+    assert dataset.seeds[1].harm_categories == []
+    assert dataset.seeds[1].metadata["deceptive_pattern"] == "Hidden Subscription"
 
 
-@pytest.mark.asyncio
 async def test_fetch_dataset_passes_config(mock_darkbench_data):
-    loader = _DarkBenchDataset(config="custom", split="test")
+    loader = _DarkBenchDataset(config="custom")
 
-    with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_darkbench_data)) as mock_fetch:
-        await loader.fetch_dataset()
+    with patch.object(
+        loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_darkbench_data)
+    ) as mock_fetch:
+        await loader.fetch_dataset_async()
 
         mock_fetch.assert_called_once()
         call_kwargs = mock_fetch.call_args.kwargs
         assert call_kwargs["config"] == "custom"
-        assert call_kwargs["split"] == "test"
+        assert call_kwargs["split"] == "train"
 
 
 def test_dataset_name():

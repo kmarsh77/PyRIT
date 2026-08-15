@@ -6,14 +6,10 @@
 #       format_name: percent
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
-#   kernelspec:
-#     display_name: pyrit-dev
-#     language: python
-#     name: pyrit-dev
 # ---
 
 # %% [markdown]
-# # 5. Simulated Conversations
+# # Simulated Conversations
 #
 # Multi-turn attacks like Crescendo [@russinovich2024crescendo] are powerful but slow — each turn
 # requires a round-trip to the target. If you've already generated a successful multi-turn prefix
@@ -41,8 +37,8 @@ from pathlib import Path
 
 from pyrit.common.path import EXECUTOR_SEED_PROMPT_PATH
 from pyrit.executor.attack import generate_simulated_conversation_async
-from pyrit.executor.attack.printer import ConsoleAttackResultPrinter
 from pyrit.models import SeedGroup
+from pyrit.output import output_attack_async
 from pyrit.prompt_target import OpenAIChatTarget
 from pyrit.score import SelfAskRefusalScorer
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
@@ -78,9 +74,7 @@ print(f"Generated {len(simulated_conversation_prompts)} messages")
 simulated_conversation = SeedGroup(seeds=simulated_conversation_prompts)
 
 # View the conversation prefix (N-1 turns)
-await ConsoleAttackResultPrinter().print_messages_async(  # type: ignore
-    messages=simulated_conversation.prepended_conversation,
-)
+# For direct message printing, use: from pyrit.output import output_conversation_async
 
 print(f"\nPrepended conversation messages: {len(simulated_conversation.prepended_conversation)}")
 print(
@@ -115,7 +109,7 @@ new_result = await new_attack.execute_async(  # type: ignore
     next_message=simulated_conversation.next_message,
 )
 
-await ConsoleAttackResultPrinter().print_result_async(result=new_result)  # type: ignore
+await output_attack_async(new_result)
 
 # %% [markdown]
 # > **Note:** If the Crescendo result shows `backtrack_count: 0` even on failure, this is expected.
@@ -129,7 +123,7 @@ await ConsoleAttackResultPrinter().print_result_async(result=new_result)  # type
 # | Parameter | Type | Description |
 # |-----------|------|-------------|
 # | `objective` | `str` | The goal the adversarial chat works toward |
-# | `adversarial_chat` | `PromptChatTarget` | The LLM that generates attack prompts (also plays the simulated target) |
+# | `adversarial_chat` | `PromptTarget` | The LLM that generates attack prompts (also plays the simulated target). Must declare `supports_multi_turn=True` and `supports_editable_history=True`. |
 # | `objective_scorer` | `TrueFalseScorer` | Evaluates whether the final turn achieved the objective |
 # | `num_turns` | `int` | Number of conversation turns to generate (default: 3) |
 # | `adversarial_chat_system_prompt_path` | `str \| Path` | System prompt for the adversarial chat role |

@@ -22,7 +22,9 @@ CoPyRIT is also available as a Docker container. See the [Docker setup](https://
 
 ### Azure Deployment
 
-Azure-hosted deployment is planned for the near future.
+CoPyRIT can be deployed to Azure Container Apps with Entra authentication and managed identity. See the [Azure deployment guide](https://github.com/microsoft/PyRIT/blob/main/infra/README.md) for the full setup.
+
+To deploy an isolated instance for an external team, see [Deploy a New Instance](../../infra/DEPLOY_NEW_INSTANCE.md).
 
 ---
 
@@ -70,6 +72,17 @@ Each assistant message has four action buttons:
 
 Click the panel toggle in the ribbon to open the conversations sidebar. This panel shows all conversations within the current attack, including message counts and last-message previews. You can switch between conversations, create new ones, and promote a conversation to be the "main" conversation.
 
+#### Exporting a Conversation
+
+Click the **Export** button in the ribbon to download the conversation that is currently displayed. Two formats are offered from the button's menu:
+
+- **Markdown (`.md`):** A human-readable transcript with each message labeled by role. Best for reading, sharing, or pasting into reports.
+- **JSON (`.json`):** A structured record of the conversation for tooling and further processing.
+
+The export runs entirely in your browser and captures exactly what is shown in the chat, including the system prompt shown in the banner — no data is sent to the server. Export stays available for read-only historical conversations, and is disabled while a conversation is empty, still loading, or sending. The button is disabled until there is at least one user or model message to export.
+
+> **Note:** Exported files can contain adversarial prompts, model responses, and other sensitive material. Store and share them responsibly.
+
 #### Labels
 
 The labels bar in the ribbon displays the current attack's labels (e.g., `operator`, `operation`). Labels are key-value pairs that help organize and filter attacks. You can add, edit, and remove labels inline. The `operator` and `operation` labels are required and cannot be removed.
@@ -95,7 +108,7 @@ Filter attacks by:
 
 - **Attack type:** The class of attack used (e.g., `PromptSendingAttack`)
 - **Outcome:** Success, failure, or undetermined
-- **Converter:** Which prompt converters were applied
+- **Converter:** Which converters were applied
 - **Operator:** Who ran the attack
 - **Operation:** The operation label
 - **Custom labels:** Free-form key:value label filtering with auto-complete
@@ -140,14 +153,27 @@ Lists all registered targets with their type, endpoint, and model name. Click "S
 
 Click "New Target" to open the creation dialog. Fill in:
 
-- **Target Type** (required): One of `OpenAIChatTarget`, `OpenAICompletionTarget`, `OpenAIImageTarget`, `OpenAIVideoTarget`, `OpenAITTSTarget`, or `OpenAIResponseTarget`
-- **Endpoint URL** (required): Your Azure OpenAI or OpenAI API endpoint
-- **Model / Deployment Name** (optional): e.g., `gpt-4o`, `dall-e-3`
+- **Target Type** (required): Select from `OpenAIChatTarget`, `OpenAICompletionTarget`, `OpenAIImageTarget`, `OpenAIVideoTarget`, `OpenAITTSTarget`, `OpenAIResponseTarget`, or `AzureMLChatTarget`
+- **Endpoint URL** (required): Your Azure OpenAI, OpenAI API, or Azure ML endpoint
+- **Model / Deployment Name** (optional): e.g., `gpt-4o`, `dall-e-3`, `Llama-3.2-3B-Instruct`
 - **API Key** (optional): Stored in memory only (not persisted to disk)
+
+For `AzureMLChatTarget`, additional fields are available: **Max New Tokens**, **Temperature**, **Top P**, and **Repetition Penalty**.
 
 #### Auto-Populating Targets
 
-Targets can also be auto-populated by adding an initializer (e.g., `airt`) to your `~/.pyrit/.pyrit_conf` file. This reads endpoints from your `.env` and `.env.local` files. See [.pyrit_conf_example](https://github.com/microsoft/PyRIT/blob/main/.pyrit_conf_example) for details.
+Targets can also be auto-populated by adding the `target` initializer to your `~/.pyrit/.pyrit_conf` file. This reads endpoints from your `.env` and `.env.local` files. See [.pyrit_conf_example](https://github.com/microsoft/PyRIT/blob/main/.pyrit_conf_example) for details.
+
+### Initializers
+
+The **Initializers** page (in the left navigation) lets you review and extend how PyRIT sets itself up at startup — for example, the `target` initializer's `tags` and `auto_group` settings.
+
+The page has two sections:
+
+- **Baseline initializers** are read-only. They come from your active configuration file (`~/.pyrit/.pyrit_conf`) and run first, in order.
+- **Additional initializers** are added in the GUI and saved to the memory database. They run after the baseline, in the order shown. You can add more than one initializer of the same type — each is its own invocation.
+
+Use **Apply now** to re-run a single initializer immediately against the running backend — handy for picking up an environment or setting change without a restart. Saved additional initializers and `.pyrit_conf` edits otherwise take effect the next time the backend starts.
 
 ---
 

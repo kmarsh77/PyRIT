@@ -1,9 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import json
 import uuid
 from pathlib import Path
-from typing import Union
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,10 +19,11 @@ from pyrit.executor.attack import (
     RedTeamingAttack,
     RTASystemPromptPaths,
 )
-from pyrit.identifiers import ComponentIdentifier
+from pyrit.executor.attack.core.attack_config import DEFAULT_ADVERSARIAL_FIRST_MESSAGE
 from pyrit.models import (
     AttackOutcome,
     AttackResult,
+    ComponentIdentifier,
     ConversationReference,
     ConversationType,
     Message,
@@ -31,8 +32,35 @@ from pyrit.models import (
     SeedPrompt,
 )
 from pyrit.prompt_normalizer import PromptNormalizer
-from pyrit.prompt_target import PromptChatTarget, PromptTarget
+from pyrit.prompt_target import PromptTarget
 from pyrit.score import Scorer, TrueFalseScorer
+
+
+def _adversarial_reply_message(next_message: str = "Adversarial next message") -> Message:
+    """Build an adversarial-chat reply Message in the canonical ``adversarial_chat`` JSON shape.
+
+    Every genuine adversarial-conversation attack now validates the adversarial reply against the
+    shared ``adversarial_chat`` schema, so a mocked reply must be JSON carrying ``next_message`` (plus
+    the ``rationale`` / ``last_response_summary`` the schema requires) rather than raw text.
+    """
+    payload = json.dumps(
+        {
+            "next_message": next_message,
+            "rationale": "test rationale",
+            "last_response_summary": "test summary",
+        }
+    )
+    return Message(
+        message_pieces=[
+            MessagePiece(
+                role="assistant",
+                original_value=payload,
+                original_value_data_type="text",
+                converted_value=payload,
+                converted_value_data_type="text",
+            )
+        ]
+    )
 
 
 def _mock_scorer_id(name: str = "MockScorer") -> ComponentIdentifier:
@@ -56,15 +84,21 @@ def mock_objective_target() -> MagicMock:
     target = MagicMock(spec=PromptTarget)
     target.send_prompt_async = AsyncMock()
     target.get_identifier.return_value = _mock_target_id("MockTarget")
+    # Sensible default: text-only target. Tests that need multimodal targets
+    # override input_modalities / output_modalities on their own copy.
+    target.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+    target.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
     return target
 
 
 @pytest.fixture
 def mock_adversarial_chat() -> MagicMock:
-    chat = MagicMock(spec=PromptChatTarget)
+    chat = MagicMock(spec=PromptTarget)
     chat.send_prompt_async = AsyncMock()
     chat.set_system_prompt = MagicMock()
     chat.get_identifier.return_value = _mock_target_id("MockChatTarget")
+    chat.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+    chat.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
     return chat
 
 
@@ -189,7 +223,7 @@ class TestRedTeamingAttackInitialization:
     ):
         """Test that attack initializes correctly with different system prompt paths."""
         adversarial_config = AttackAdversarialConfig(
-            target=mock_adversarial_chat, system_prompt_path=system_prompt_path
+            target=mock_adversarial_chat, system_prompt=SeedPrompt.from_yaml_file(system_prompt_path)
         )
         scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
 
@@ -215,12 +249,12 @@ class TestRedTeamingAttackInitialization:
         mock_objective_target: MagicMock,
         mock_objective_scorer: MagicMock,
         mock_adversarial_chat: MagicMock,
-        seed_prompt: Union[str, SeedPrompt],
+        seed_prompt: str | SeedPrompt,
         expected_value: str,
         expected_type: type,
     ):
         """Test that attack handles different seed prompt input types correctly."""
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat, seed_prompt=seed_prompt)
+        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat, first_message=seed_prompt)
         scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
 
         attack = RedTeamingAttack(
@@ -229,24 +263,15 @@ class TestRedTeamingAttackInitialization:
             attack_scoring_config=scoring_config,
         )
 
-        assert attack._adversarial_chat_seed_prompt.value == expected_value
+        assert attack._adversarial_chat_first_message.value == expected_value
         if expected_type is str:
-            assert attack._adversarial_chat_seed_prompt.data_type == "text"
+            assert attack._adversarial_chat_first_message.data_type == "text"
 
-    def test_init_with_invalid_system_prompt_path_raises_error(
-        self, mock_objective_target: MagicMock, mock_objective_scorer: MagicMock, mock_adversarial_chat: MagicMock
-    ):
-        """Test that invalid system prompt path raises FileNotFoundError."""
-        adversarial_config = AttackAdversarialConfig(
-            target=mock_adversarial_chat, system_prompt_path="nonexistent_file.yaml"
-        )
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
-
+    def test_init_with_invalid_system_prompt_path_raises_error(self, mock_adversarial_chat: MagicMock):
+        """Test that loading a nonexistent system prompt path raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
-            RedTeamingAttack(
-                objective_target=mock_objective_target,
-                attack_adversarial_config=adversarial_config,
-                attack_scoring_config=scoring_config,
+            AttackAdversarialConfig(
+                target=mock_adversarial_chat, system_prompt=SeedPrompt.from_yaml_file("nonexistent_file.yaml")
             )
 
     def test_init_with_all_custom_configurations(
@@ -283,6 +308,33 @@ class TestRedTeamingAttackInitialization:
         scoring_config = AttackScoringConfig()  # No objective_scorer
 
         with pytest.raises(ValueError, match="Objective scorer must be provided"):
+            RedTeamingAttack(
+                objective_target=mock_objective_target,
+                attack_adversarial_config=adversarial_config,
+                attack_scoring_config=scoring_config,
+            )
+
+    @pytest.mark.parametrize(
+        "missing_capability",
+        ["multi_turn", "system_prompt"],
+    )
+    def test_init_rejects_adversarial_chat_missing_native_capability(
+        self,
+        mock_objective_target: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        missing_capability: str,
+    ):
+        """Adversarial chat must natively support MULTI_TURN and SYSTEM_PROMPT."""
+        from pyrit.prompt_target.common.target_capabilities import CapabilityName
+
+        mock_adversarial_chat.configuration.includes.side_effect = lambda *, capability: (
+            capability != CapabilityName(missing_capability)
+        )
+        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
+        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
+
+        with pytest.raises(ValueError, match=f"RedTeamingAttack .*{missing_capability}"):
             RedTeamingAttack(
                 objective_target=mock_objective_target,
                 attack_adversarial_config=adversarial_config,
@@ -330,7 +382,6 @@ class TestRedTeamingAttackInitialization:
 class TestContextCreation:
     """Tests for context creation from parameters"""
 
-    @pytest.mark.asyncio
     async def test_execute_async_creates_context_properly(
         self, mock_objective_target: MagicMock, mock_objective_scorer: MagicMock, mock_adversarial_chat: MagicMock
     ):
@@ -383,7 +434,6 @@ class TestContextCreation:
                         # Verify that validation was called
                         mock_validate.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_execute_async_with_custom_prompt(
         self, mock_objective_target: MagicMock, mock_objective_scorer: MagicMock, mock_adversarial_chat: MagicMock
     ):
@@ -427,7 +477,6 @@ class TestContextCreation:
                         assert captured_context.next_message is not None
                         assert captured_context.next_message.message_pieces[0].original_value == "My custom prompt"
 
-    @pytest.mark.asyncio
     async def test_execute_async_invalid_message_type(
         self, mock_objective_target: MagicMock, mock_objective_scorer: MagicMock, mock_adversarial_chat: MagicMock
     ):
@@ -526,18 +575,19 @@ class TestContextValidation:
                 max_turns=0,
             )
 
-    @pytest.mark.asyncio
     async def test_max_turns_validation_with_prepended_conversation(
         self,
         mock_objective_scorer: MagicMock,
         mock_adversarial_chat: MagicMock,
     ):
         """Test that prepended conversation turns are validated against max_turns."""
-        # Create a separate chat target for objective since prepended_conversation requires PromptChatTarget
-        mock_chat_objective_target = MagicMock(spec=PromptChatTarget)
+        # Create a separate chat target for objective since prepended_conversation requires PromptTarget
+        mock_chat_objective_target = MagicMock(spec=PromptTarget)
         mock_chat_objective_target.send_prompt_async = AsyncMock()
         mock_chat_objective_target.set_system_prompt = MagicMock()
         mock_chat_objective_target.get_identifier.return_value = _mock_target_id("MockChatTarget")
+        mock_chat_objective_target.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+        mock_chat_objective_target.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
 
         adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
         scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
@@ -569,7 +619,6 @@ class TestContextValidation:
 class TestSetupPhase:
     """Tests for the setup phase of the attack."""
 
-    @pytest.mark.asyncio
     async def test_setup_initializes_conversation_session(
         self,
         mock_objective_target: MagicMock,
@@ -595,7 +644,6 @@ class TestSetupPhase:
         assert basic_context.session is not None
         assert isinstance(basic_context.session, ConversationSession)
 
-    @pytest.mark.asyncio
     async def test_setup_updates_turn_count_from_prepended_conversation(
         self,
         mock_objective_target: MagicMock,
@@ -623,7 +671,6 @@ class TestSetupPhase:
 
         assert basic_context.executed_turns == 3
 
-    @pytest.mark.asyncio
     async def test_setup_merges_memory_labels_correctly(
         self,
         mock_objective_target: MagicMock,
@@ -644,6 +691,11 @@ class TestSetupPhase:
         # Add memory labels to both attack and context
         attack._memory_labels = {"strategy_label": "strategy_value", "common": "strategy"}
         basic_context.memory_labels = {"context_label": "context_value", "common": "context"}
+        basic_context.prepended_conversation = [
+            Message.from_prompt(prompt="prepended user", role="user"),
+            Message.from_prompt(prompt="prepended assistant", role="assistant"),
+        ]
+        attack._memory = MagicMock()
 
         # Mock that simulates initialize_context_async merging labels
         async def mock_initialize(*, context, memory_labels=None, **kwargs):
@@ -662,7 +714,6 @@ class TestSetupPhase:
             "common": "context",
         }
 
-    @pytest.mark.asyncio
     async def test_setup_sets_adversarial_chat_system_prompt(
         self,
         mock_objective_target: MagicMock,
@@ -691,7 +742,6 @@ class TestSetupPhase:
         assert "Test objective" in call_args.kwargs["system_prompt"]
         assert call_args.kwargs["conversation_id"] == basic_context.session.adversarial_chat_conversation_id
 
-    @pytest.mark.asyncio
     async def test_setup_retrieves_last_score_matching_scorer_type(
         self,
         mock_objective_target: MagicMock,
@@ -748,7 +798,6 @@ class TestSetupPhase:
 class TestPromptGeneration:
     """Tests for prompt generation logic"""
 
-    @pytest.mark.asyncio
     async def test_generate_next_prompt_uses_custom_prompt_on_first_turn(
         self,
         mock_objective_target: MagicMock,
@@ -779,7 +828,6 @@ class TestPromptGeneration:
         # Should not call adversarial chat
         mock_prompt_normalizer.send_prompt_async.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_generate_next_prompt_uses_custom_prompt_regardless_of_turn(
         self,
         mock_objective_target: MagicMock,
@@ -810,7 +858,6 @@ class TestPromptGeneration:
         # Should not call adversarial chat
         mock_prompt_normalizer.send_prompt_async.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_generate_next_prompt_uses_adversarial_chat_after_first_turn(
         self,
         mock_objective_target: MagicMock,
@@ -833,16 +880,16 @@ class TestPromptGeneration:
 
         basic_context.executed_turns = 1
         basic_context.next_message = None  # No message
-        mock_prompt_normalizer.send_prompt_async.return_value = sample_response
+        # The manager always validates the adversarial reply against the canonical adversarial_chat
+        # schema, so the reply is JSON and ``next_message`` is extracted as the objective prompt.
+        adversarial_response = _adversarial_reply_message("Adversarial next message")
+        mock_prompt_normalizer.send_prompt_async.return_value = adversarial_response
 
-        # Mock build_adversarial_prompt
-        with patch.object(attack, "_build_adversarial_prompt", new_callable=AsyncMock, return_value="Built prompt"):
-            result = await attack._generate_next_prompt_async(context=basic_context)
+        result = await attack._generate_next_prompt_async(context=basic_context)
 
-        assert result.get_value() == sample_response.get_value()
+        assert result.get_value() == "Adversarial next message"
         mock_prompt_normalizer.send_prompt_async.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_generate_next_prompt_raises_on_none_response(
         self,
         mock_objective_target: MagicMock,
@@ -865,263 +912,14 @@ class TestPromptGeneration:
         basic_context.executed_turns = 1
         mock_prompt_normalizer.send_prompt_async.return_value = None
 
-        # Mock build_adversarial_prompt
-        with patch.object(attack, "_build_adversarial_prompt", new_callable=AsyncMock, return_value="Built prompt"):
-            with pytest.raises(ValueError, match="Received no response from adversarial chat"):
-                await attack._generate_next_prompt_async(context=basic_context)
-
-
-@pytest.mark.usefixtures("patch_central_database")
-class TestAdversarialPromptBuilding:
-    """Tests for building adversarial prompts."""
-
-    @pytest.mark.asyncio
-    async def test_build_adversarial_prompt_returns_seed_when_no_response(
-        self,
-        mock_objective_target: MagicMock,
-        mock_objective_scorer: MagicMock,
-        mock_adversarial_chat: MagicMock,
-        basic_context: MultiTurnAttackContext,
-    ):
-        """Test that the seed prompt is returned when no previous response exists."""
-        seed = "Initial seed"
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat, seed_prompt=seed)
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
-
-        attack = RedTeamingAttack(
-            objective_target=mock_objective_target,
-            attack_adversarial_config=adversarial_config,
-            attack_scoring_config=scoring_config,
-        )
-
-        basic_context.last_response = None
-        result = await attack._build_adversarial_prompt(basic_context)
-
-        assert result == seed
-
-    @pytest.mark.parametrize(
-        "data_type,converted_value,has_error,is_blocked,expected_result",
-        [
-            ("text", "Normal response", False, False, "Normal response"),
-            ("text", "Response with feedback", False, False, "Response with feedback"),
-            ("error", "Error message", True, False, "Request to target failed: Error message"),
-            (
-                "text",
-                "",
-                True,
-                True,
-                "Request to target failed: blocked. Please rewrite your prompt to avoid getting blocked next time.",
-            ),
-            ("text", "", False, False, "The previous response was empty. Please continue."),
-        ],
-    )
-    async def test_handle_adversarial_text_response(
-        self,
-        mock_objective_target: MagicMock,
-        mock_objective_scorer: MagicMock,
-        mock_adversarial_chat: MagicMock,
-        basic_context: MultiTurnAttackContext,
-        data_type: str,
-        converted_value: str,
-        has_error: bool,
-        is_blocked: bool,
-        expected_result: str,
-    ):
-        """Test handling of various text response scenarios."""
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
-
-        attack = RedTeamingAttack(
-            objective_target=mock_objective_target,
-            attack_adversarial_config=adversarial_config,
-            attack_scoring_config=scoring_config,
-        )
-
-        response_piece = MagicMock(spec=MessagePiece)
-        response_piece.converted_value_data_type = data_type
-        response_piece.converted_value = converted_value
-        response_piece.has_error.return_value = has_error
-        response_piece.is_blocked.return_value = is_blocked
-        response_piece.response_error = "Error message"
-
-        basic_context.last_response = MagicMock(spec=Message)
-        basic_context.last_response.get_piece.return_value = response_piece
-        basic_context.last_score = None
-
-        result = attack._handle_adversarial_text_response(context=basic_context)
-
-        assert result == expected_result
-
-    @pytest.mark.asyncio
-    async def test_handle_adversarial_text_response_with_feedback(
-        self,
-        mock_objective_target: MagicMock,
-        mock_objective_scorer: MagicMock,
-        mock_adversarial_chat: MagicMock,
-        basic_context: MultiTurnAttackContext,
-        success_score: Score,
-    ):
-        """Test that scoring feedback is appended to text responses when enabled."""
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer, use_score_as_feedback=True)
-
-        attack = RedTeamingAttack(
-            objective_target=mock_objective_target,
-            attack_adversarial_config=adversarial_config,
-            attack_scoring_config=scoring_config,
-        )
-
-        response_piece = MagicMock(spec=MessagePiece)
-        response_piece.converted_value_data_type = "text"
-        response_piece.converted_value = "Target response"
-        response_piece.has_error.return_value = False
-
-        basic_context.last_response = MagicMock(spec=Message)
-        basic_context.last_response.get_piece.return_value = response_piece
-        basic_context.last_score = success_score
-
-        result = attack._handle_adversarial_text_response(context=basic_context)
-
-        assert "Target response" in result
-        assert success_score.score_rationale in result
-
-    def test_handle_adversarial_text_response_no_response(
-        self,
-        mock_objective_target: MagicMock,
-        mock_objective_scorer: MagicMock,
-        mock_adversarial_chat: MagicMock,
-        basic_context: MultiTurnAttackContext,
-    ):
-        """Test handling when no last response is available."""
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
-
-        attack = RedTeamingAttack(
-            objective_target=mock_objective_target,
-            attack_adversarial_config=adversarial_config,
-            attack_scoring_config=scoring_config,
-        )
-
-        basic_context.last_response = None
-
-        result = attack._handle_adversarial_text_response(context=basic_context)
-
-        assert result == "No response available. Please continue."
-
-    def test_handle_adversarial_file_response_raises_on_error(
-        self,
-        mock_objective_target: MagicMock,
-        mock_objective_scorer: MagicMock,
-        mock_adversarial_chat: MagicMock,
-        basic_context: MultiTurnAttackContext,
-    ):
-        """Test that file response with error raises RuntimeError."""
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
-
-        attack = RedTeamingAttack(
-            objective_target=mock_objective_target,
-            attack_adversarial_config=adversarial_config,
-            attack_scoring_config=scoring_config,
-        )
-
-        response_piece = MagicMock(spec=MessagePiece)
-        response_piece.converted_value_data_type = "image_path"
-        response_piece.has_error.return_value = True
-        response_piece.response_error = "File error"
-
-        basic_context.last_response = MagicMock(spec=Message)
-        basic_context.last_response.get_piece.return_value = response_piece
-
-        with pytest.raises(RuntimeError, match="Request to target failed.*File error"):
-            attack._handle_adversarial_file_response(context=basic_context)
-
-    def test_handle_adversarial_file_response_without_feedback_raises(
-        self,
-        mock_objective_target: MagicMock,
-        mock_objective_scorer: MagicMock,
-        mock_adversarial_chat: MagicMock,
-        basic_context: MultiTurnAttackContext,
-    ):
-        """Test that file response without feedback enabled raises ValueError."""
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer, use_score_as_feedback=False)
-
-        attack = RedTeamingAttack(
-            objective_target=mock_objective_target,
-            attack_adversarial_config=adversarial_config,
-            attack_scoring_config=scoring_config,
-        )
-
-        response_piece = MagicMock(spec=MessagePiece)
-        response_piece.converted_value_data_type = "image_path"
-        response_piece.has_error.return_value = False
-
-        basic_context.last_response = MagicMock(spec=Message)
-        basic_context.last_response.get_piece.return_value = response_piece
-
-        with pytest.raises(ValueError, match="use_score_as_feedback flag is set to False"):
-            attack._handle_adversarial_file_response(context=basic_context)
-
-    def test_handle_adversarial_file_response_with_feedback(
-        self,
-        mock_objective_target: MagicMock,
-        mock_objective_scorer: MagicMock,
-        mock_adversarial_chat: MagicMock,
-        basic_context: MultiTurnAttackContext,
-        success_score: Score,
-    ):
-        """Test that file response with feedback returns score rationale."""
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer, use_score_as_feedback=True)
-
-        attack = RedTeamingAttack(
-            objective_target=mock_objective_target,
-            attack_adversarial_config=adversarial_config,
-            attack_scoring_config=scoring_config,
-        )
-
-        response_piece = MagicMock(spec=MessagePiece)
-        response_piece.converted_value_data_type = "image_path"
-        response_piece.has_error.return_value = False
-
-        basic_context.last_response = MagicMock(spec=Message)
-        basic_context.last_response.get_piece.return_value = response_piece
-        basic_context.last_score = success_score
-
-        result = attack._handle_adversarial_file_response(context=basic_context)
-
-        assert result == success_score.score_rationale
-
-    def test_handle_adversarial_file_response_no_response(
-        self,
-        mock_objective_target: MagicMock,
-        mock_objective_scorer: MagicMock,
-        mock_adversarial_chat: MagicMock,
-        basic_context: MultiTurnAttackContext,
-    ):
-        """Test handling when no last response is available for file response."""
-        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
-        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer, use_score_as_feedback=True)
-
-        attack = RedTeamingAttack(
-            objective_target=mock_objective_target,
-            attack_adversarial_config=adversarial_config,
-            attack_scoring_config=scoring_config,
-        )
-
-        basic_context.last_response = None
-
-        result = attack._handle_adversarial_file_response(context=basic_context)
-
-        assert result == "No response available. Please continue."
+        with pytest.raises(ValueError, match="No response received for conversation ID"):
+            await attack._generate_next_prompt_async(context=basic_context)
 
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestResponseScoring:
     """Tests for response scoring logic."""
 
-    @pytest.mark.asyncio
     async def test_score_response_successful(
         self,
         mock_objective_target: MagicMock,
@@ -1151,7 +949,6 @@ class TestResponseScoring:
 
         assert result == success_score
 
-    @pytest.mark.asyncio
     async def test_score_response_returns_none_for_blocked(
         self,
         mock_objective_target: MagicMock,
@@ -1182,7 +979,6 @@ class TestResponseScoring:
 
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_score_response_returns_none_when_no_response(
         self,
         mock_objective_target: MagicMock,
@@ -1211,7 +1007,6 @@ class TestResponseScoring:
 class TestAttackExecution:
     """Tests for the main attack execution logic."""
 
-    @pytest.mark.asyncio
     async def test_perform_attack_with_message_bypasses_adversarial_chat_on_first_turn(
         self,
         mock_objective_target: MagicMock,
@@ -1255,7 +1050,6 @@ class TestAttackExecution:
         # Verify the message was cleared after use
         assert basic_context.next_message is None
 
-    @pytest.mark.asyncio
     async def test_perform_async_sets_atomic_attack_identifier(
         self,
         mock_objective_target: MagicMock,
@@ -1288,7 +1082,6 @@ class TestAttackExecution:
         assert result.atomic_attack_identifier.class_name == "AtomicAttack"
         assert result.get_attack_strategy_identifier() == attack.get_identifier()
 
-    @pytest.mark.asyncio
     async def test_perform_attack_with_multi_piece_message_uses_first_piece(
         self,
         mock_objective_target: MagicMock,
@@ -1348,7 +1141,6 @@ class TestAttackExecution:
             ("false", False),
         ],
     )
-    @pytest.mark.asyncio
     async def test_perform_attack_with_different_score_outcomes(
         self,
         mock_objective_target: MagicMock,
@@ -1401,7 +1193,6 @@ class TestAttackExecution:
 
         assert (result.outcome == AttackOutcome.SUCCESS) == expected_achieved
 
-    @pytest.mark.asyncio
     async def test_perform_attack_reaches_max_turns(
         self,
         mock_objective_target: MagicMock,
@@ -1447,12 +1238,62 @@ class TestAttackExecution:
         assert mock_send.call_count == 3
         assert mock_score.call_count == 3
 
+    async def test_perform_builds_adversarial_manager_once_and_threads_it(
+        self,
+        mock_objective_target: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+        basic_context: MultiTurnAttackContext,
+        sample_response: Message,
+        failure_score: Score,
+    ):
+        """The adversarial manager is built once per run and the same instance is reused every turn.
+
+        Regression guard for the build-once refactor: the manager's conversation scope (ids,
+        objective, memory labels) is fixed for the run, so rebuilding it each turn would waste work
+        and risk drift. This pins that _perform_async builds it exactly once and threads that same
+        instance into every _generate_next_prompt_async call.
+        """
+        adversarial_config = AttackAdversarialConfig(target=mock_adversarial_chat)
+        scoring_config = AttackScoringConfig(objective_scorer=mock_objective_scorer)
+
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=adversarial_config,
+            attack_scoring_config=scoring_config,
+            prompt_normalizer=mock_prompt_normalizer,
+            max_turns=3,
+        )
+
+        sentinel_manager = MagicMock()
+
+        with (
+            patch.object(attack, "_build_adversarial_manager", return_value=sentinel_manager) as mock_build,
+            patch.object(
+                attack, "_generate_next_prompt_async", new_callable=AsyncMock, return_value="Attack prompt"
+            ) as mock_generate,
+            patch.object(
+                attack,
+                "_send_prompt_to_objective_target_async",
+                new_callable=AsyncMock,
+                return_value=sample_response,
+            ),
+            patch.object(attack, "_score_response_async", new_callable=AsyncMock, return_value=failure_score),
+        ):
+            await attack._perform_async(context=basic_context)
+
+        # Built exactly once for the whole run, not once per turn.
+        mock_build.assert_called_once()
+        # Every turn received that same manager instance.
+        assert mock_generate.call_count == 3
+        assert all(call.kwargs["adversarial_manager"] is sentinel_manager for call in mock_generate.call_args_list)
+
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestAttackLifecycle:
     """Tests for the complete attack lifecycle (execute_async)"""
 
-    @pytest.mark.asyncio
     async def test_execute_async_successful_lifecycle(
         self,
         mock_objective_target: MagicMock,
@@ -1496,7 +1337,6 @@ class TestAttackLifecycle:
         assert isinstance(result, AttackResult)
         assert result.outcome == AttackOutcome.SUCCESS
 
-    @pytest.mark.asyncio
     async def test_execute_async_validation_failure_prevents_execution(
         self,
         mock_objective_target: MagicMock,
@@ -1533,7 +1373,6 @@ class TestAttackLifecycle:
         mock_perform.assert_not_called()
         mock_teardown.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_execute_with_context_async_successful(
         self,
         mock_objective_target: MagicMock,
@@ -1576,7 +1415,6 @@ class TestAttackLifecycle:
         assert result.outcome == AttackOutcome.SUCCESS
         assert result.objective == basic_context.objective
 
-    @pytest.mark.asyncio
     async def test_teardown_async_is_noop(
         self,
         mock_objective_target: MagicMock,
@@ -1603,7 +1441,6 @@ class TestAttackLifecycle:
 class TestRedTeamingConversationTracking:
     """Test that adversarial chat conversation IDs are properly tracked."""
 
-    @pytest.mark.asyncio
     async def test_setup_tracks_adversarial_chat_conversation_id(
         self,
         mock_objective_target: MagicMock,
@@ -1634,7 +1471,6 @@ class TestRedTeamingConversationTracking:
                 in basic_context.related_conversations
             )
 
-    @pytest.mark.asyncio
     async def test_attack_result_includes_adversarial_chat_conversation_ids(
         self,
         mock_objective_target: MagicMock,
@@ -1664,6 +1500,7 @@ class TestRedTeamingConversationTracking:
             mock_send.return_value = sample_response
             mock_score.return_value = {"objective_scores": [success_score]}
             mock_generate.return_value = generated_message
+            mock_objective_scorer.score_async = AsyncMock(return_value=[success_score])
 
             # Run setup and attack
             await attack._setup_async(context=basic_context)
@@ -1678,7 +1515,6 @@ class TestRedTeamingConversationTracking:
                 in result.related_conversations
             )
 
-    @pytest.mark.asyncio
     async def test_adversarial_chat_conversation_id_uniqueness(
         self,
         mock_objective_target: MagicMock,
@@ -1766,7 +1602,6 @@ class TestScoreLastTurnOnly:
 
         assert attack._score_last_turn_only is True
 
-    @pytest.mark.asyncio
     async def test_score_last_turn_only_skips_intermediate_scoring(
         self,
         mock_objective_target: MagicMock,
@@ -1804,7 +1639,6 @@ class TestScoreLastTurnOnly:
                     # Should only score the last turn (turn 3)
                     assert mock_score.call_count == 1
 
-    @pytest.mark.asyncio
     async def test_score_last_turn_only_false_scores_every_turn(
         self,
         mock_objective_target: MagicMock,
@@ -1842,7 +1676,6 @@ class TestScoreLastTurnOnly:
                     # Should score all 3 turns
                     assert mock_score.call_count == 3
 
-    @pytest.mark.asyncio
     async def test_score_last_turn_only_runs_all_turns(
         self,
         mock_objective_target: MagicMock,
@@ -1882,7 +1715,6 @@ class TestScoreLastTurnOnly:
                     # Prompt should have been sent 5 times
                     assert mock_send.call_count == 5
 
-    @pytest.mark.asyncio
     async def test_score_last_turn_only_sets_intermediate_scores_to_none(
         self,
         mock_objective_target: MagicMock,
@@ -1930,7 +1762,6 @@ class TestScoreLastTurnOnly:
                     # The final result should have a score
                     assert result.last_score == failure_score
 
-    @pytest.mark.asyncio
     async def test_score_last_turn_only_can_still_succeed_on_last_turn(
         self,
         mock_objective_target: MagicMock,
@@ -1968,3 +1799,320 @@ class TestScoreLastTurnOnly:
                     # Should succeed based on final score
                     assert result.outcome == AttackOutcome.SUCCESS
                     assert result.last_score == success_score
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestModalityRouterIntegration:
+    """Integration tests for the capability-aware modality router wiring."""
+
+    @staticmethod
+    def _set_image_capable_objective(target: MagicMock) -> None:
+        target.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text"}), frozenset({"text", "image_path"})}
+        )
+        target.configuration.capabilities.output_modalities = frozenset({frozenset({"image_path"})})
+
+    @staticmethod
+    def _make_image_response() -> Message:
+        return Message(
+            message_pieces=[
+                MessagePiece(
+                    role="assistant",
+                    original_value="/tmp/output.png",
+                    original_value_data_type="image_path",
+                    converted_value="/tmp/output.png",
+                    converted_value_data_type="image_path",
+                )
+            ]
+        )
+
+    async def test_generate_next_prompt_forwards_image_to_adversarial_when_supported(
+        self,
+        mock_objective_target: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+        basic_context: MultiTurnAttackContext,
+        sample_response: Message,
+    ):
+        """Adversarial that advertises {text, image_path} receives a 2-piece feedback Message."""
+        self._set_image_capable_objective(mock_objective_target)
+        mock_adversarial_chat.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text"}), frozenset({"text", "image_path"})}
+        )
+
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(
+                target=mock_adversarial_chat, adversarial_prompt_template="rationale"
+            ),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+            prompt_normalizer=mock_prompt_normalizer,
+        )
+
+        basic_context.executed_turns = 1
+        basic_context.last_response = self._make_image_response()
+        mock_prompt_normalizer.send_prompt_async.return_value = _adversarial_reply_message()
+
+        await attack._generate_next_prompt_async(context=basic_context)
+
+        # Adversarial received the multimodal feedback (text + image).
+        sent_message = mock_prompt_normalizer.send_prompt_async.call_args.kwargs["message"]
+        assert len(sent_message.message_pieces) == 2
+        assert sent_message.message_pieces[0].original_value == "rationale"
+        assert sent_message.message_pieces[1].original_value_data_type == "image_path"
+        assert sent_message.message_pieces[1].original_value == "/tmp/output.png"
+
+    async def test_generate_next_prompt_falls_back_to_text_when_adversarial_lacks_media_input(
+        self,
+        mock_objective_target: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+        basic_context: MultiTurnAttackContext,
+        sample_response: Message,
+    ):
+        """Adversarial with text-only input still sees rationale text, no image piece."""
+        self._set_image_capable_objective(mock_objective_target)
+        # mock_adversarial_chat default is text-only.
+
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(
+                target=mock_adversarial_chat, adversarial_prompt_template="rationale"
+            ),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+            prompt_normalizer=mock_prompt_normalizer,
+        )
+
+        basic_context.executed_turns = 1
+        basic_context.last_response = self._make_image_response()
+        mock_prompt_normalizer.send_prompt_async.return_value = _adversarial_reply_message()
+
+        await attack._generate_next_prompt_async(context=basic_context)
+
+        sent_message = mock_prompt_normalizer.send_prompt_async.call_args.kwargs["message"]
+        assert len(sent_message.message_pieces) == 1
+        assert sent_message.get_value() == "rationale"
+
+    async def test_generate_next_prompt_forwards_prev_image_to_objective_when_supported(
+        self,
+        mock_objective_target: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+        basic_context: MultiTurnAttackContext,
+        sample_response: Message,
+    ):
+        """Objective that accepts {text, image_path} gets the previous image in the request."""
+        self._set_image_capable_objective(mock_objective_target)
+
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+            prompt_normalizer=mock_prompt_normalizer,
+        )
+
+        basic_context.executed_turns = 1
+        basic_context.last_response = self._make_image_response()
+        mock_prompt_normalizer.send_prompt_async.return_value = _adversarial_reply_message("adv text")
+
+        result = await attack._generate_next_prompt_async(context=basic_context)
+
+        # Returned message (the one to send to the objective) contains text + previous image.
+        assert len(result.message_pieces) == 2
+        assert result.message_pieces[0].original_value == "adv text"
+        assert result.message_pieces[1].original_value_data_type == "image_path"
+        assert result.message_pieces[1].original_value == "/tmp/output.png"
+
+    async def test_generate_next_prompt_does_not_forward_prev_image_when_target_text_only(
+        self,
+        mock_objective_target: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+        basic_context: MultiTurnAttackContext,
+        sample_response: Message,
+    ):
+        """Text-only objective never receives prior images even if available."""
+        # mock_objective_target default is text-only.
+
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+            prompt_normalizer=mock_prompt_normalizer,
+        )
+
+        basic_context.executed_turns = 1
+        basic_context.last_response = self._make_image_response()
+        mock_prompt_normalizer.send_prompt_async.return_value = _adversarial_reply_message("adv text")
+
+        result = await attack._generate_next_prompt_async(context=basic_context)
+
+        assert len(result.message_pieces) == 1
+        assert result.get_value() == "adv text"
+
+    async def test_generate_next_prompt_placeholder_branch_fills_in_adv_text(
+        self,
+        mock_objective_target: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+        basic_context: MultiTurnAttackContext,
+        sample_response: Message,
+    ):
+        """next_message with placeholder + seed image -> adv text fills the slot."""
+        # Edit-only objective: only {text, image_path}.
+        mock_objective_target.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text", "image_path"})}
+        )
+        mock_adversarial_chat.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text"}), frozenset({"text", "image_path"})}
+        )
+
+        shared_conv = "edit-conv"
+        seed_message = Message(
+            message_pieces=[
+                MessagePiece(
+                    role="user",
+                    original_value="",
+                    original_value_data_type="text",
+                    conversation_id=shared_conv,
+                    prompt_metadata={"adversarial_placeholder": True},
+                ),
+                MessagePiece(
+                    role="user",
+                    original_value="/path/to/seed.png",
+                    original_value_data_type="image_path",
+                    conversation_id=shared_conv,
+                ),
+            ]
+        )
+        basic_context.next_message = seed_message
+        basic_context.executed_turns = 0
+
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat, first_message="seed text"),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+            prompt_normalizer=mock_prompt_normalizer,
+        )
+
+        mock_prompt_normalizer.send_prompt_async.return_value = _adversarial_reply_message("adv text")
+
+        result = await attack._generate_next_prompt_async(context=basic_context)
+
+        # next_message is cleared after consumption.
+        assert basic_context.next_message is None
+        # Adversarial chat WAS called (placeholder branch routes through it).
+        mock_prompt_normalizer.send_prompt_async.assert_called_once()
+        sent_prompt_message = mock_prompt_normalizer.send_prompt_async.call_args.kwargs["message"]
+        assert len(sent_prompt_message.message_pieces) == 2
+        assert sent_prompt_message.message_pieces[0].original_value_data_type == "text"
+        assert sent_prompt_message.message_pieces[0].original_value == "seed text"
+        assert sent_prompt_message.message_pieces[1].original_value_data_type == "image_path"
+        assert sent_prompt_message.message_pieces[1].original_value == "/path/to/seed.png"
+        # Resulting message has the adversarial text in place of the placeholder, plus the seed.
+        assert len(result.message_pieces) == 2
+        assert result.message_pieces[0].original_value == "adv text"
+        assert result.message_pieces[0].original_value_data_type == "text"
+        assert result.message_pieces[1].original_value_data_type == "image_path"
+        assert result.message_pieces[1].original_value == "/path/to/seed.png"
+
+    def test_validate_context_raises_when_edit_only_target_has_no_seed(
+        self,
+        mock_objective_target: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        basic_context: MultiTurnAttackContext,
+    ):
+        """Edit-only objective without seed in next_message fails validation early."""
+        mock_objective_target.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text", "image_path"})}
+        )
+
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+        )
+
+        with pytest.raises(ValueError, match="seed"):
+            attack._validate_context(context=basic_context)
+
+
+class TestRedTeamingAdversarialIdentity:
+    """Tests for adversarial config in the RedTeaming attack identity and inline system prompt."""
+
+    def test_get_attack_adversarial_config_includes_target_system_and_seed(
+        self, mock_objective_target, mock_adversarial_chat, mock_objective_scorer
+    ):
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+        )
+        config = attack.get_attack_adversarial_config()
+        assert config is not None
+        assert config.target is mock_adversarial_chat
+        assert config.system_prompt is attack._adversarial_chat_system_prompt_template
+        assert config.first_message is attack._adversarial_chat_first_message
+
+    def test_identifier_includes_adversarial_chat_child(
+        self, mock_objective_target, mock_adversarial_chat, mock_objective_scorer
+    ):
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+        )
+        identifier = attack.get_identifier()
+        assert "adversarial_chat" in identifier.children
+        assert identifier.children["adversarial_chat"] == mock_adversarial_chat.get_identifier.return_value
+
+    def test_inline_system_prompt_string_resolved_and_in_identity(
+        self, mock_objective_target, mock_adversarial_chat, mock_objective_scorer
+    ):
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(
+                target=mock_adversarial_chat, system_prompt="custom red team persona"
+            ),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+        )
+        assert attack._adversarial_chat_system_prompt_template.value == "custom red team persona"
+        assert attack.get_identifier().params["adversarial_system_prompt"] == "custom red team persona"
+
+    def test_inline_seed_prompt_string_used(self, mock_objective_target, mock_adversarial_chat, mock_objective_scorer):
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(
+                target=mock_adversarial_chat, first_message="kick off {{ objective }}"
+            ),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+        )
+        assert attack._adversarial_chat_first_message.value == "kick off {{ objective }}"
+        assert attack.get_identifier().params["adversarial_seed_prompt"] == "kick off {{ objective }}"
+
+    def test_seed_prompt_none_falls_back_to_default(
+        self, mock_objective_target, mock_adversarial_chat, mock_objective_scorer
+    ):
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat, first_message=None),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+        )
+        assert attack._adversarial_chat_first_message.value == DEFAULT_ADVERSARIAL_FIRST_MESSAGE
+
+    def test_get_attack_adversarial_config_returns_none_without_target(
+        self, mock_objective_target, mock_adversarial_chat, mock_objective_scorer
+    ):
+        attack = RedTeamingAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat),
+            attack_scoring_config=AttackScoringConfig(objective_scorer=mock_objective_scorer),
+        )
+        attack._adversarial_chat = None
+        assert attack.get_attack_adversarial_config() is None

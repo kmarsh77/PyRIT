@@ -14,8 +14,7 @@ from pyrit.executor.attack.multi_turn import (
     ChunkedRequestAttack,
     ChunkedRequestAttackContext,
 )
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import Message, MessagePiece
+from pyrit.models import ComponentIdentifier, Message, MessagePiece
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 
@@ -258,7 +257,6 @@ class TestChunkedRequestAttack:
 class TestChunkedRequestAttackExecution:
     """Tests for the main attack execution logic."""
 
-    @pytest.mark.asyncio
     async def test_perform_async_sets_atomic_attack_identifier(self):
         """Test that _perform_async sets atomic_attack_identifier in the correct AtomicAttack format."""
         mock_target = _make_mock_target()

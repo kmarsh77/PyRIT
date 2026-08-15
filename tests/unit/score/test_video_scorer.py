@@ -3,15 +3,13 @@
 
 import os
 import uuid
-from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
 from unit.mocks import get_mock_scorer_identifier
 
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import MessagePiece, Score
+from pyrit.models import ComponentIdentifier, MessagePiece, Score
 from pyrit.score.audio_transcript_scorer import AudioTranscriptHelper
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
 from pyrit.score.float_scale.video_float_scale_scorer import VideoFloatScaleScorer
@@ -30,12 +28,12 @@ def is_opencv_installed():
 
 
 @pytest.fixture(autouse=True)
-def video_converter_sample_video(patch_central_database):
+def video_converter_sample_video(tmp_path, patch_central_database):
     # Create a sample video file
-    video_path = "test_video.mp4"
+    video_path = str(tmp_path / "test_video.mp4")
     width, height = 512, 512
     if is_opencv_installed():
-        import cv2  # noqa: F401
+        import cv2
 
         # Create a video writer object
         video_encoding = cv2.VideoWriter_fourcc(*"mp4v")
@@ -54,18 +52,16 @@ def video_converter_sample_video(patch_central_database):
         converted_value=video_path,
         original_value_data_type="video_path",
         converted_value_data_type="video_path",
+        conversation_id=str(uuid.uuid4()),
     )
     message_piece.id = uuid.uuid4()
     yield message_piece
-    # Cleanup the sample video file
-    if os.path.exists(video_path):
-        os.remove(video_path)
 
 
 class MockTrueFalseScorer(TrueFalseScorer):
     """Mock TrueFalseScorer for testing"""
 
-    def __init__(self, return_value: bool = True):
+    def __init__(self, *, return_value: bool = True):
         self.return_value = return_value
         validator = ScorerPromptValidator(supported_data_types=["image_path"])
         super().__init__(validator=validator)
@@ -78,7 +74,7 @@ class MockTrueFalseScorer(TrueFalseScorer):
         """
         return self._create_identifier()
 
-    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: Optional[str] = None) -> list[Score]:
+    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: str | None = None) -> list[Score]:
         return [
             Score(
                 score_type="true_false",
@@ -97,7 +93,7 @@ class MockTrueFalseScorer(TrueFalseScorer):
 class MockFloatScaleScorer(FloatScaleScorer):
     """Mock FloatScaleScorer for testing"""
 
-    def __init__(self, return_value: float = 0.8):
+    def __init__(self, *, return_value: float = 0.8):
         self.return_value = return_value
         validator = ScorerPromptValidator(supported_data_types=["image_path"])
         super().__init__(validator=validator)
@@ -110,7 +106,7 @@ class MockFloatScaleScorer(FloatScaleScorer):
         """
         return self._create_identifier()
 
-    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: Optional[str] = None) -> list[Score]:
+    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: str | None = None) -> list[Score]:
         return [
             Score(
                 score_type="float_scale",
@@ -126,7 +122,6 @@ class MockFloatScaleScorer(FloatScaleScorer):
         ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_extract_frames_true_false(video_converter_sample_video):
     """Test that frame extraction produces the expected number of frames"""
@@ -150,7 +145,6 @@ async def test_extract_frames_true_false(video_converter_sample_video):
         os.remove(path)  # Cleanup
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_extract_frames_float_scale(video_converter_sample_video):
     """Test that frame extraction produces the expected number of frames for float scale scorer"""
@@ -174,7 +168,6 @@ async def test_extract_frames_float_scale(video_converter_sample_video):
         os.remove(path)  # Cleanup
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_score_video_true_false(video_converter_sample_video):
     """Test video scoring with a true/false scorer"""
@@ -189,7 +182,6 @@ async def test_score_video_true_false(video_converter_sample_video):
     assert "Frames (3):" in scores[0].score_rationale
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_score_video_true_false_with_false_frames(video_converter_sample_video):
     """Test video scoring when all frames score false"""
@@ -204,7 +196,6 @@ async def test_score_video_true_false_with_false_frames(video_converter_sample_v
     assert "Frames (3):" in scores[0].score_rationale
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_score_video_float_scale(video_converter_sample_video):
     """Test video scoring with a float_scale scorer"""
@@ -220,7 +211,6 @@ async def test_score_video_float_scale(video_converter_sample_video):
     assert "Video scored by analyzing" in scores[0].score_rationale
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_score_video_no_frames(video_converter_sample_video):
     """Test error handling when no frames can be extracted"""
@@ -234,7 +224,6 @@ async def test_score_video_no_frames(video_converter_sample_video):
         await scorer._score_piece_async(video_converter_sample_video)
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_score_video_no_scores(video_converter_sample_video):
     """Test error handling when frame scoring returns no scores"""
@@ -248,7 +237,6 @@ async def test_score_video_no_scores(video_converter_sample_video):
         await scorer._score_piece_async(video_converter_sample_video)
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_video_true_false_scorer_with_objective(video_converter_sample_video):
     """Test that objective is passed through correctly"""
@@ -262,7 +250,6 @@ async def test_video_true_false_scorer_with_objective(video_converter_sample_vid
     assert scores[0].objective == objective
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_video_float_scale_scorer_with_objective(video_converter_sample_video):
     """Test that objective is passed through correctly for float scale scorer"""
@@ -298,7 +285,7 @@ def test_video_scorer_default_num_frames():
 class MockAudioTrueFalseScorer(TrueFalseScorer):
     """Mock AudioTrueFalseScorer for testing video+audio integration"""
 
-    def __init__(self, return_value: bool = True):
+    def __init__(self, *, return_value: bool = True):
         self.return_value = return_value
         self.received_objective = None
         # Audio scorer needs to support audio_path data type
@@ -308,7 +295,7 @@ class MockAudioTrueFalseScorer(TrueFalseScorer):
     def _build_identifier(self) -> ComponentIdentifier:
         return self._create_identifier()
 
-    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: Optional[str] = None) -> list[Score]:
+    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: str | None = None) -> list[Score]:
         self.received_objective = objective
         return [
             Score(
@@ -325,7 +312,6 @@ class MockAudioTrueFalseScorer(TrueFalseScorer):
         ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_video_true_false_scorer_with_audio_scorer(video_converter_sample_video):
     """Test video scoring with an audio scorer"""
@@ -348,7 +334,28 @@ async def test_video_true_false_scorer_with_audio_scorer(video_converter_sample_
         assert "visual" in scores[0].score_rationale.lower() or "audio" in scores[0].score_rationale.lower()
 
 
-@pytest.mark.asyncio
+@pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
+async def test_video_audio_scorer_cleans_up_extracted_audio(tmp_path, video_converter_sample_video):
+    """_score_video_audio_async unlinks the temp audio file after successful scoring."""
+    image_scorer = MockTrueFalseScorer(return_value=True)
+    audio_scorer = MockAudioTrueFalseScorer(return_value=True)
+
+    # Create a real temp audio file that should be deleted by the cleanup branch.
+    extracted_audio = tmp_path / "extracted_audio.wav"
+    extracted_audio.write_bytes(b"fake audio bytes")
+
+    with patch.object(AudioTranscriptHelper, "extract_audio_from_video", return_value=str(extracted_audio)):
+        scorer = VideoTrueFalseScorer(
+            image_capable_scorer=image_scorer,
+            audio_scorer=audio_scorer,
+            num_sampled_frames=3,
+        )
+
+        await scorer._score_piece_async(video_converter_sample_video)
+
+    assert not extracted_audio.exists()
+
+
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_video_scorer_and_aggregation_both_true(video_converter_sample_video):
     """Test AND aggregation when both visual and audio scores are true"""
@@ -368,7 +375,6 @@ async def test_video_scorer_and_aggregation_both_true(video_converter_sample_vid
         assert scores[0].score_value == "true"
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_video_scorer_and_aggregation_visual_false(video_converter_sample_video):
     """Test AND aggregation when visual is false and audio is true"""
@@ -388,7 +394,6 @@ async def test_video_scorer_and_aggregation_visual_false(video_converter_sample_
         assert scores[0].score_value == "false"
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_video_scorer_and_aggregation_audio_false(video_converter_sample_video):
     """Test AND aggregation when visual is true and audio is false"""
@@ -408,7 +413,6 @@ async def test_video_scorer_and_aggregation_audio_false(video_converter_sample_v
         assert scores[0].score_value == "false"
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_video_scorer_with_audio_uses_and_aggregation(video_converter_sample_video):
     """Test that with audio present, AND aggregation is used (visual=False + audio=True = False)"""
@@ -429,7 +433,6 @@ async def test_video_scorer_with_audio_uses_and_aggregation(video_converter_samp
         assert scores[0].score_value == "false"
 
 
-@pytest.mark.asyncio
 @pytest.mark.skipif(not is_opencv_installed(), reason="opencv is not installed")
 async def test_video_scorer_without_audio_scorer(video_converter_sample_video):
     """Test that video scoring works without audio scorer"""

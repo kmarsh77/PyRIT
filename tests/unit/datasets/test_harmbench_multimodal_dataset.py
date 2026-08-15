@@ -34,7 +34,6 @@ def mock_harmbench_mm_data():
     ]
 
 
-@pytest.mark.asyncio
 async def test_fetch_dataset(mock_harmbench_mm_data):
     loader = _HarmBenchMultimodalDataset()
 
@@ -42,7 +41,7 @@ async def test_fetch_dataset(mock_harmbench_mm_data):
         patch.object(loader, "_fetch_from_url", return_value=mock_harmbench_mm_data),
         patch.object(loader, "_fetch_and_save_image_async", new=AsyncMock(return_value="/path/to/image.png")),
     ):
-        dataset = await loader.fetch_dataset()
+        dataset = await loader.fetch_dataset_async()
 
     assert isinstance(dataset, SeedDataset)
     # Only multimodal entry => 2 prompts (image + text)
@@ -52,9 +51,12 @@ async def test_fetch_dataset(mock_harmbench_mm_data):
     assert image_prompt.data_type == "image_path"
     assert text_prompt.data_type == "text"
     assert text_prompt.value == "Describe harmful content in this image"
+    assert image_prompt.harm_categories == ["COORDINATION_HARM", "MALWARE"]
+    assert text_prompt.harm_categories == ["COORDINATION_HARM", "MALWARE"]
+    assert image_prompt.metadata["semantic_category"] == "cybercrime_intrusion"
+    assert text_prompt.metadata["semantic_category"] == "cybercrime_intrusion"
 
 
-@pytest.mark.asyncio
 async def test_fetch_dataset_skips_failed_images():
     data = [
         {
@@ -82,13 +84,12 @@ async def test_fetch_dataset_skips_failed_images():
             new=AsyncMock(side_effect=[Exception("download failed"), "/path/to/image.png"]),
         ),
     ):
-        dataset = await loader.fetch_dataset()
+        dataset = await loader.fetch_dataset_async()
 
     # First image failed, second succeeded => 2 prompts (image + text for second)
     assert len(dataset.seeds) == 2
 
 
-@pytest.mark.asyncio
 async def test_fetch_dataset_filters_by_category():
     data = [
         {
@@ -112,21 +113,54 @@ async def test_fetch_dataset_filters_by_category():
         patch.object(loader, "_fetch_from_url", return_value=data),
         patch.object(loader, "_fetch_and_save_image_async", new=AsyncMock(return_value="/path/to/image.png")),
     ):
-        dataset = await loader.fetch_dataset()
+        dataset = await loader.fetch_dataset_async()
 
     # Only "illegal" category matched => 2 prompts (image + text)
     assert len(dataset.seeds) == 2
-    assert all(p.harm_categories == ["illegal"] for p in dataset.seeds)
+    assert all(p.harm_categories == ["COORDINATION_HARM"] for p in dataset.seeds)
 
 
-@pytest.mark.asyncio
+async def test_fetch_dataset_standardizes_all_semantic_categories():
+    expected_categories = {
+        "chemical_biological": ["CBRN"],
+        "cybercrime_intrusion": ["COORDINATION_HARM", "MALWARE"],
+        "harassment_bullying": ["HARASSMENT", "HATE_SPEECH", "REPRESENTATIONAL"],
+        "illegal": ["COORDINATION_HARM"],
+        "misinformation_disinformation": ["INFO_INTEGRITY"],
+        "copyright": ["COPYRIGHT"],
+        "harmful": ["OTHER"],
+    }
+    data = [
+        {
+            "Behavior": f"Behavior for {category}",
+            "BehaviorID": f"b{index}",
+            "FunctionalCategory": "multimodal",
+            "SemanticCategory": category,
+            "ImageFileName": f"img{index}.jpg",
+        }
+        for index, category in enumerate(expected_categories)
+    ]
+    loader = _HarmBenchMultimodalDataset()
+
+    with (
+        patch.object(loader, "_fetch_from_url", return_value=data),
+        patch.object(loader, "_fetch_and_save_image_async", new=AsyncMock(return_value="/path/to/image.png")),
+    ):
+        dataset = await loader.fetch_dataset_async()
+
+    for category, expected in expected_categories.items():
+        seeds = [seed for seed in dataset.seeds if seed.metadata["semantic_category"] == category]
+        assert len(seeds) == 2
+        assert all(seed.harm_categories == expected for seed in seeds)
+
+
 async def test_fetch_dataset_missing_keys_raises():
     loader = _HarmBenchMultimodalDataset()
     bad_data = [{"Behavior": "test"}]
 
     with patch.object(loader, "_fetch_from_url", return_value=bad_data):
         with pytest.raises(ValueError, match="Missing keys"):
-            await loader.fetch_dataset()
+            await loader.fetch_dataset_async()
 
 
 def test_dataset_name():
@@ -144,3 +178,56 @@ def test_init_rejects_raw_string_matching_enum_value_for_categories():
     """Test that raw strings matching enum values are rejected."""
     with pytest.raises(ValueError, match="Expected SemanticCategory"):
         _HarmBenchMultimodalDataset(categories=["illegal"])
+
+
+def test_init_with_empty_categories_raises():
+    """Test that an empty categories list raises ValueError at construction."""
+    with pytest.raises(ValueError, match="`categories` must be a non-empty list"):
+        _HarmBenchMultimodalDataset(categories=[])
+
+
+async def test_fetch_and_save_image_raises_when_memory_not_configured():
+    """Test that _fetch_and_save_image_async raises RuntimeError when serializer memory is not configured."""
+    from unittest.mock import MagicMock
+
+    mock_serializer = MagicMock()
+    mock_memory = MagicMock()
+    mock_memory.results_path = None
+    mock_memory.results_storage_io = None
+    mock_serializer._memory = mock_memory
+
+    with patch(
+        "pyrit.datasets.seed_datasets.remote._image_cache.data_serializer_factory",
+        return_value=mock_serializer,
+    ):
+        loader = _HarmBenchMultimodalDataset()
+        with pytest.raises(RuntimeError, match="Serializer memory is not properly configured"):
+            await loader._fetch_and_save_image_async(behavior_id="test_id", image_url="https://example.com/img.png")
+
+
+async def test_fetch_and_save_image_returns_cached_path():
+    """Test that _fetch_and_save_image_async returns cached path when image already exists."""
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    mock_serializer = MagicMock()
+    mock_memory = MagicMock()
+    mock_memory.results_path = "/results"
+    mock_storage_io = AsyncMock()
+    mock_storage_io.path_exists_async = AsyncMock(return_value=True)
+    mock_memory.results_storage_io = mock_storage_io
+    mock_serializer._memory = mock_memory
+    mock_serializer.data_sub_directory = "/images"
+
+    with patch(
+        "pyrit.datasets.seed_datasets.remote._image_cache.data_serializer_factory",
+        return_value=mock_serializer,
+    ):
+        loader = _HarmBenchMultimodalDataset()
+        result = await loader._fetch_and_save_image_async(
+            behavior_id="test_id", image_url="https://example.com/img.png"
+        )
+
+    expected_path = str(Path("/results") / "images" / "harmbench_test_id.png")
+    assert result == expected_path
+    assert mock_serializer.value == expected_path

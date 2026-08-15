@@ -6,11 +6,44 @@ applyTo: '**/*.py'
 
 Follow these coding standards to ensure consistent, readable, and maintainable code across the PyRIT project.
 
+## Async Code
+
+### No Blocking I/O in Async Paths
+- **MANDATORY**: Inside `async def` (and any sync helper reached from one), never call blocking I/O or `time.sleep`. They stall the event loop and serialize all concurrent work.
+- File I/O → `aiofiles` (already a project dep). HTTP → `httpx.AsyncClient` or `pyrit.common.net_utility.make_request_and_raise_if_error_async`. Sleeps → `asyncio.sleep`. Subprocess → `asyncio.create_subprocess_*`. Blocking-only libs (`wave`, `av`, `cv2`, `PIL.Image.open` from disk, `zipfile`, `yaml`, `json` reads from file) → wrap the blocking section in a sync helper and call via `await asyncio.to_thread(_helper, ...)`.
+- I/O that runs **once at construction time** (`__init__`) is sync by design; prefer doing one-shot reads there rather than on every async call.
+
+```python
+# WRONG — blocks the event loop on every send
+async def _send_async(self):
+    with open(self.file_path, "rb") as fp:
+        return fp.read()
+
+# CORRECT — async file read
+async def _send_async(self):
+    async with aiofiles.open(self.file_path, "rb") as fp:
+        return await fp.read()
+
+# WRONG — sync-only library called directly
+async def _read_audio_async(self, path):
+    with wave.open(path, "rb") as wav:
+        return wav.readframes(wav.getnframes())
+
+# CORRECT — wrap blocking lib in to_thread
+def _read_wav_sync(path):
+    with wave.open(path, "rb") as wav:
+        return wav.readframes(wav.getnframes())
+
+async def _read_audio_async(self, path):
+    return await asyncio.to_thread(_read_wav_sync, path)
+```
+
 ## Function and Method Naming
 
 ### Async Functions
 - **MANDATORY**: All async functions and methods MUST end with `_async` suffix
 - This applies to ALL async functions without exception
+- Enforced by the `check-async-suffix` pre-commit hook (`build_scripts/check_async_suffix.py`)
 
 ```python
 # CORRECT
@@ -21,6 +54,13 @@ async def send_prompt_async(self, prompt: str) -> Message:
 async def send_prompt(self, prompt: str) -> Message:  # Missing _async suffix
     ...
 ```
+
+**Exemptions** are limited and explicit:
+- Async dunders (`__aenter__`, `__aexit__`, `__aiter__`, `__anext__`) are exempt automatically.
+- A small set of framework-mandated names (`lifespan`, `dispatch`, `__call__`) is exempt
+  automatically; see `_FRAMEWORK_EXEMPT_NAMES` in `build_scripts/check_async_suffix.py`.
+- For one-off exemptions (e.g. an external SDK protocol method) add a
+  `# pyrit-async-suffix-exempt` trailing comment on the `async def` line.
 
 ### Private Methods
 - Private methods MUST start with underscore
@@ -50,6 +90,7 @@ def validate_input(self, data: dict) -> None:  # Should be private
   - `str | None` not `Optional[str]`
   - `int | float` not `Union[int, float]`
 - Still import `Any`, `Literal`, `TypeVar`, `Protocol`, `cast` etc. from `typing` as needed
+- **This rule applies to docstrings and comments too.** Argument type references inside docstrings (e.g. `Args:` blocks) and any comment mentioning a type should use the modern form so the docs stay consistent with the signatures.
 
 ```python
 # CORRECT
@@ -86,6 +127,14 @@ def __init__(self, target: PromptTarget, scorer: Scorer | None = None, max_retri
     ...
 ```
 
+### Forwarded Constructor Parameters
+- When a registry-built class accepts `**kwargs` in `__init__` and passes them
+  to `super().__init__(**kwargs)`, decorate the constructor with
+  `@forward_init_parameters`.
+- Do not apply the decorator to open-ended keyword bags that are consumed
+  locally or are not forwarded. The registry uses the marker specifically to
+  include parent constructor parameters in the class's build contract.
+
 ### Single Parameter Functions
 - Functions with only one parameter don't need keyword-only enforcement
 
@@ -95,28 +144,80 @@ def process(self, data: str) -> str:
     ...
 ```
 
-## Documentation Standards
+## Imports
 
-### Import Placement
-- **MANDATORY**: All import statements MUST be at the top of the file
-- Do NOT use inline/local imports inside functions or methods
-- The only exception is breaking circular import dependencies, which should be rare and documented
+### Placement and Organization
+
+Top of file, grouped: stdlib → third-party → local.
+
+### Deferred Imports for Performance
+
+Imports may be placed inside functions/methods when they pull in expensive
+third-party packages (`transformers`, `azure.storage.blob`, `alembic`, `openai`,
+`scipy`, `pandas`, `av`). Two cases:
+
+1. **CLI entry points** — defer heavy imports to after arg parsing so `--help` is instant.
+2. **Internal modules** — when a method is the only consumer of a heavy package.
 
 ```python
-# CORRECT — imports at the top of the file
-from contextlib import closing
-from sqlalchemy.exc import SQLAlchemyError
+def main() -> int:
+    parsed_args = parse_args()
+    from pyrit.cli import frontend_core  # deferred: heavy
+    ...
 
-def update_entry(self, entry: Base) -> None:
-    with closing(self.get_session()) as session:
-        ...
-
-# INCORRECT — inline import inside a function
-def update_entry(self, entry: Base) -> None:
-    from contextlib import closing          # ← WRONG, must be at top of file
-    with closing(self.get_session()) as session:
-        ...
+async def _create_container_client_async(self):
+    from azure.storage.blob.aio import ContainerClient  # deferred: heavy
+    ...
 ```
+
+Guard tests in `tests/unit/cli/test_import_guards.py` enforce that key import
+paths stay fast.
+
+### Lazy `__init__.py` Exports (PEP 562)
+
+Public API packages (`pyrit.prompt_target`, `pyrit.converter`, `pyrit.score`)
+use `__getattr__`-based lazy loading so heavy symbols can be imported from the
+package without paying the cost at package load time. See
+`pyrit/prompt_target/__init__.py` for the canonical example. Rules:
+
+- Lazy names must remain in `__all__` and have a `TYPE_CHECKING` import for IDE support.
+- Internal utility packages (e.g., `pyrit.common`) simply omit heavy submodules
+  from `__init__.py` — consumers import directly from the specific file.
+
+### Import Paths
+
+Import from the package root when the symbol is exported from `__init__.py`:
+
+```python
+from pyrit.prompt_target import PromptTarget  # CORRECT
+from pyrit.prompt_target.common.prompt_target import PromptTarget  # WRONG
+```
+
+Heavy submodules not re-exported from `__init__.py` are imported directly:
+
+```python
+from pyrit.common.net_utility import get_httpx_client
+```
+
+Within the same package, import from the specific file to avoid circular imports.
+
+### Typing Backports (`typing_extensions`)
+
+For typing features that don't exist on every supported Python (`Self`,
+`override`, `TypeAlias`, `Unpack`, `NotRequired`, etc.), import from
+``typing_extensions`` rather than ``typing``. `typing_extensions` is already a
+transitive dependency (pulled in by ``pydantic``) and works across all supported
+Python versions, so this avoids per-version branching and ``# type: ignore`` noise.
+
+```python
+# CORRECT — works on 3.10+
+from typing_extensions import Self, override
+
+# INCORRECT — `Self` is 3.11+, `override` is 3.12+, breaks on older runtimes
+from typing import Self, override
+```
+
+## Documentation Standards
 
 ### Docstring Format
 - Use Google-style docstrings
@@ -155,6 +256,48 @@ def calculate_score(
         ScoringException: If the scoring process fails.
     """
 ```
+
+### Code references in docstrings
+
+The PyRIT docs build uses **MyST** (Markdown-flavoured), not reStructuredText.
+Do **not** use reST cross-reference roles in docstrings or module comments —
+they render as raw text under MyST. A pre-commit hook
+(`check_no_rest_roles`) blocks new ones from landing.
+
+Use plain double-backticks for symbol references. The API page generator
+(`build_scripts/gen_api_md.py`) automatically rewrites known PyRIT symbol
+names into MyST cross-reference links at build time, so you get clickable
+navigation in the rendered docs without any extra markup.
+
+```python
+# WRONG — reST roles render as literal `:class:\`SeedPrompt\`` under MyST,
+# and the pre-commit guard will reject them
+"""Returns a :class:`SeedPrompt` instance."""
+"""Delegate to :func:`download_files_async` (deprecated alias)."""
+"""See :meth:`PromptTarget.apply_capabilities` for details."""
+
+# CORRECT — plain double-backticks; gen_api_md.py auto-links these
+"""Returns a ``SeedPrompt`` instance."""
+"""Delegate to ``download_files_async`` (deprecated alias)."""
+"""See ``PromptTarget.apply_capabilities`` for details."""
+```
+
+The auto-linker resolves:
+
+- bare class/function names (`` ``SeedPrompt`` ``)
+- `Class.method` references (`` ``PromptTarget.apply_capabilities`` ``)
+- fully-qualified paths (`` ``pyrit.models.SeedPrompt`` ``)
+- bare method names when the docstring is on the owning class
+  (`` ``send_prompt_async`` `` inside `PromptTarget`)
+
+Ambiguous short names (e.g. two unrelated classes both called `Scorer`)
+are left as plain code-spans; spell out the FQN when you need a stable
+cross-reference. Unknown names also stay as plain code-spans, so
+docstrings remain safe to write without consulting the symbol index.
+
+If you need an explicit MyST link in markdown documentation, use the
+standard syntax `` [`Name`](#api-pyrit_module-Name) `` — but inside
+Python docstrings this should be rare; plain backticks are the default.
 
 ### Class-Level Constants
 - Define constants as class attributes, not module-level
@@ -211,63 +354,6 @@ async def execute_attack_async(self, *, context: AttackContext) -> AttackResult:
 5. Private methods (internal implementation)
 6. Static methods and class methods at the end
 
-### Import Organization
-```python
-# Standard library imports
-import asyncio
-import json
-import logging
-from dataclasses import dataclass
-from enum import Enum
-from pathlib import Path
-from typing import Any
-
-# Third-party imports
-import numpy as np
-from tqdm import tqdm
-
-# Local application imports
-from pyrit.attacks.base import AttackStrategy
-from pyrit.models import AttackResult
-from pyrit.prompt_target import PromptTarget
-```
-
-Unless necessary, always import at the top of the file. Don't import inside a function or method.
-
-
-### Import paths
-
-Often, pyrit has specific files that can be imported. However IF you are importing from a different module than your namespace,
-import from the root pyrit module if it's exposed from init.
-
-In the same module, importing from the specific path is usually necessary to prevent circular imports.
-
-- Always check __init__.py exports first - Before using a specific file path, verify if the class/function is exposed at a higher level
-- Group related imports - Put all imports from the same root module together
-- Use multi-line formatting for readability - When importing 3+ items from the same module, use parentheses
-
-
-```python
-# Correct
-from pyrit.prompt_target import PromptChatTarget, OpenAIChatTarget
-
-# Correct
-from pyrit.score import (
-    AzureContentFilterScorer,
-    FloatScaleThresholdScorer,
-    SelfAskRefusalScorer,
-    TrueFalseCompositeScorer,
-    TrueFalseInverterScorer,
-    TrueFalseScoreAggregator,
-    TrueFalseScorer,
-)
-
-# Incorrect (if importing from a non-target module)
-from pyrit.prompt_target.common.prompt_chat_target import PromptChatTarget
-from pyrit.prompt_target.openai.openai_chat_target import OpenAIChatTarget
-
-```
-
 ## Error Handling
 
 ### Specific Exceptions
@@ -314,6 +400,52 @@ def process_items(self, *, items: list[str]) -> list[str]:
         return []
 ```
 
+## Deprecations
+
+When deprecating a public class, function, method, parameter, or module path, use `pyrit.common.deprecation.print_deprecation_message` — **never** `warnings.warn` directly. It wraps `warnings.warn(..., DeprecationWarning, stacklevel=3)` with a consistent format so filtering still works.
+
+Set `removed_in` to **current version + 2 minor versions** (e.g. `0.14.x` → `removed_in="0.16.0"`). This gives one full release cycle of warning before removal.
+
+```python
+from pyrit.common.deprecation import print_deprecation_message
+
+def old_method(self, *, foo: str) -> None:
+    print_deprecation_message(
+        old_item="MyClass.old_method",
+        new_item="MyClass.new_method",
+        removed_in="0.16.0",
+    )
+    ...
+```
+
+`old_item` / `new_item` accept a class/callable (qualified name is generated) or a string.
+
+```python
+# INCORRECT - bypasses the helper, breaks consistent formatting and filtering
+import warnings
+warnings.warn("foo is deprecated, use bar", DeprecationWarning, stacklevel=2)
+```
+
+If you find yourself reaching for `warnings.warn` because the
+"`X` is deprecated and will be removed in `Y`. Use `Z` instead." template doesn't fit your message, **rework the message to fit the template** (e.g. lean on the docstring or a log line for any extra nuance). Do not stuff extra prose into `new_item` to work around the template.
+
+### Deprecating an argument with a non-default value
+
+To detect "user passed this argument" reliably, use a sentinel default (typically `None`) rather than the documented default, and warn whenever the value is not the sentinel — otherwise callers who explicitly pass the documented default get no warning even though they're using the deprecated path.
+
+```python
+# CORRECT - warns on any explicit value, including the old documented default of 1
+def run_async(self, *, max_concurrency: int | None = None) -> None:
+    if max_concurrency is not None:
+        print_deprecation_message(
+            old_item="run_async(max_concurrency=...)",
+            new_item="run_async(executor=AttackExecutor(max_concurrency=...))",
+            removed_in="0.16.0",
+        )
+    effective = max_concurrency if max_concurrency is not None else 1
+    ...
+```
+
 ## Pythonic Patterns
 
 ### List Comprehensions
@@ -357,9 +489,18 @@ async def temporary_config(self, **kwargs):
 ### Property Decorators
 - Use @property for simple computed attributes
 - Use explicit getter/setter methods for complex logic
+- Property docstrings must be **noun phrases** describing the value (e.g.
+  `"""The display name."""`), not verb phrases (e.g. `"""Return the display
+  name."""`). This is enforced by Ruff `D421` (property-docstring-starts-with-verb).
 
 ```python
 # CORRECT
+@property
+def is_complete(self) -> bool:
+    """Whether the attack is complete."""
+    return self._status == AttackStatus.COMPLETE
+
+# INCORRECT - verb-phrase docstring, flagged by Ruff D421
 @property
 def is_complete(self) -> bool:
     """Check if the attack is complete."""
@@ -438,17 +579,30 @@ def process_large_dataset(self, *, file_path: Path) -> list[Result]:
     return [self._process_line(line) for line in lines]
 ```
 
+### Lazy Imports for Startup Performance
+- When adding a new module that imports heavy third-party packages (e.g., `transformers`,
+  `scipy`, `PIL`, `datasets`, `av`), consider whether it is re-exported from a package
+  `__init__.py` that is on the CLI startup path
+- If so, add it to the `_LAZY_IMPORTS` dict in that `__init__.py` instead of as an
+  eager top-level import (see the Import Placement section for the pattern)
+- This is especially important for `pyrit/common/__init__.py`, `pyrit/prompt_target/__init__.py`,
+  `pyrit/converter/__init__.py`, and `pyrit/score/__init__.py` which are all on the
+  import path for CLI startup
+
 ## Final Checklist
 
 Before committing code, ensure:
+- [ ] No blocking I/O on async paths (no sync `open`, `requests.*`, `time.sleep`, `wave.open`, etc. inside `async def` or sync helpers reached from `async def`)
 - [ ] All async functions have `_async` suffix
 - [ ] All functions have complete type annotations
 - [ ] Functions with >1 parameter use keyword-only arguments
 - [ ] Docstrings include parameter types
+- [ ] Docstrings use plain double-backtick code spans for symbol references (no reST roles)
 - [ ] Enums are used instead of Literals
 - [ ] Functions are focused and under 20 lines
 - [ ] Error messages are helpful and specific
 - [ ] Code follows the import organization pattern
+- [ ] New modules with heavy deps follow `__init__.py` startup guidance
 - [ ] No hard-coded dependencies
 - [ ] Complex logic is extracted to helper methods
 

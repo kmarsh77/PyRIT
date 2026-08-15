@@ -7,24 +7,25 @@ import uuid
 from typing import Any
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
+from pyrit.converter import Converter, ConverterResult
 from pyrit.exceptions import (
     InvalidJsonException,
     pyrit_json_retry,
     remove_markdown_json,
 )
 from pyrit.models import (
+    JsonResponseConfig,
     Message,
     MessagePiece,
     PromptDataType,
     SeedPrompt,
 )
-from pyrit.prompt_converter import ConverterResult, PromptConverter
-from pyrit.prompt_target import PromptChatTarget
+from pyrit.prompt_target import PromptTarget
 
 logger = logging.getLogger(__name__)
 
 
-class FuzzerConverter(PromptConverter):
+class FuzzerConverter(Converter):
     """
     Base class for GPTFUZZER converters.
 
@@ -40,14 +41,14 @@ class FuzzerConverter(PromptConverter):
     def __init__(
         self,
         *,
-        converter_target: PromptChatTarget = REQUIRED_VALUE,  # type: ignore[assignment]
+        converter_target: PromptTarget = REQUIRED_VALUE,  # type: ignore[ty:invalid-parameter-default]
         prompt_template: SeedPrompt,
-    ):
+    ) -> None:
         """
         Initialize the converter with the specified chat target and prompt template.
 
         Args:
-            converter_target (PromptChatTarget): Chat target used to perform fuzzing on user prompt.
+            converter_target (PromptTarget): Chat target used to perform fuzzing on user prompt.
                 Can be omitted if a default has been configured via PyRIT initialization.
             prompt_template (SeedPrompt): Template to be used instead of the default system prompt with
                 instructions for the chat target.
@@ -84,20 +85,18 @@ class FuzzerConverter(PromptConverter):
         self.converter_target.set_system_prompt(
             system_prompt=self.system_prompt,
             conversation_id=conversation_id,
-            attack_identifier=None,
         )
 
         formatted_prompt = f"===={self.template_label} BEGINS====\n{prompt}\n===={self.template_label} ENDS===="
-        prompt_metadata: dict[str, str | int] = {"response_format": "json"}
+        prompt_metadata = JsonResponseConfig(enabled=True).to_metadata()
         request = Message(
-            [
+            message_pieces=[
                 MessagePiece(
                     role="user",
                     original_value=formatted_prompt,
                     converted_value=formatted_prompt,
                     conversation_id=conversation_id,
                     sequence=1,
-                    prompt_target_identifier=self.converter_target.get_identifier(),
                     original_value_data_type=input_type,
                     converted_value_data_type=input_type,
                     converter_identifiers=[self.get_identifier()],

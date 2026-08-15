@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging  # noqa: TC003
 from abc import ABC
 from dataclasses import dataclass
-from typing import Optional, TypeVar
+from typing import TypeVar
 
 from pyrit.common.logger import logger
 from pyrit.executor.core.strategy import (
@@ -26,7 +26,6 @@ class PromptGeneratorStrategyContext(StrategyContext, ABC):
     """Base class for all prompt generator strategy contexts."""
 
 
-@dataclass
 class PromptGeneratorStrategyResult(StrategyResult, ABC):
     """Base class for all prompt generator strategy results."""
 
@@ -39,7 +38,7 @@ class _DefaultPromptGeneratorStrategyEventHandler(
     Handles events during the execution of a prompt generator strategy.
     """
 
-    def __init__(self, logger: logging.Logger = logger):
+    def __init__(self, logger: logging.Logger = logger) -> None:
         """
         Initialize the default event handler with a logger.
 
@@ -48,7 +47,7 @@ class _DefaultPromptGeneratorStrategyEventHandler(
         """
         self._logger = logger
 
-    async def on_event(
+    async def on_event_async(
         self, event_data: StrategyEventData[PromptGeneratorStrategyContextT, PromptGeneratorStrategyResultT]
     ) -> None:
         """
@@ -71,10 +70,9 @@ class PromptGeneratorStrategy(Strategy[PromptGeneratorStrategyContextT, PromptGe
         self,
         context_type: type[PromptGeneratorStrategyContextT],
         logger: logging.Logger = logger,
-        event_handler: Optional[
-            StrategyEventHandler[PromptGeneratorStrategyContextT, PromptGeneratorStrategyResultT]
-        ] = None,
-    ):
+        event_handler: StrategyEventHandler[PromptGeneratorStrategyContextT, PromptGeneratorStrategyResultT]
+        | None = None,
+    ) -> None:
         """
         Initialize the prompt generator strategy.
 

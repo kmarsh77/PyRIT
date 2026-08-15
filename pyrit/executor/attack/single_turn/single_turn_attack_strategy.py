@@ -7,7 +7,7 @@ import logging  # noqa: TC003
 import uuid
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 from pyrit.common.logger import logger
 from pyrit.executor.attack.core.attack_parameters import AttackParameters, AttackParamsT
@@ -31,11 +31,8 @@ class SingleTurnAttackContext(AttackContext[AttackParamsT]):
     # Unique identifier of the main conversation between the attacker and model
     conversation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
-    # System prompt for chat-based targets
-    system_prompt: Optional[str] = None
-
     # Arbitrary metadata that downstream attacks or scorers may attach
-    metadata: Optional[dict[str, Union[str, int]]] = None
+    metadata: dict[str, str | int] | None = None
 
 
 class SingleTurnAttackStrategy(AttackStrategy[SingleTurnAttackContext[Any], AttackResult], ABC):
@@ -50,16 +47,16 @@ class SingleTurnAttackStrategy(AttackStrategy[SingleTurnAttackContext[Any], Atta
         *,
         objective_target: PromptTarget,
         context_type: type[SingleTurnAttackContext[Any]] = SingleTurnAttackContext,
-        params_type: type[AttackParamsT] = AttackParameters,  # type: ignore[assignment]
+        params_type: type[AttackParamsT] = AttackParameters,  # type: ignore[ty:invalid-parameter-default]
         logger: logging.Logger = logger,
-    ):
+    ) -> None:
         """
         Define a base class for single-turn attack strategies.
 
         Args:
             objective_target (PromptTarget): The target system to attack.
             context_type (type[SingleTurnAttackContext]): The type of context this strategy will use.
-            params_type (Type[AttackParamsT]): The type of parameters this strategy accepts.
+            params_type (type[AttackParamsT]): The type of parameters this strategy accepts.
             logger (logging.Logger): Logger instance for logging events and messages.
         """
         super().__init__(

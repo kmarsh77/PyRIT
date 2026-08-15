@@ -4,7 +4,6 @@
 from unittest.mock import patch
 
 import pandas as pd
-import pytest
 
 from pyrit.datasets.seed_datasets.remote.transphobia_awareness_dataset import (
     _TransphobiaAwarenessDataset,
@@ -31,7 +30,6 @@ class TestTransphobiaAwarenessDataset:
         dataset = _TransphobiaAwarenessDataset(source=custom_url)
         assert dataset.source == custom_url
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_with_mock_data(self):
         """Test fetching dataset with mocked pandas read_excel."""
         # Create mock DataFrame
@@ -50,20 +48,22 @@ class TestTransphobiaAwarenessDataset:
         dataset_loader = _TransphobiaAwarenessDataset()
 
         with patch("pandas.read_excel", return_value=mock_df):
-            dataset = await dataset_loader.fetch_dataset(cache=False)
+            dataset = await dataset_loader.fetch_dataset_async(cache=False)
 
             assert isinstance(dataset, SeedDataset)
             assert dataset.dataset_name == "transphobia_awareness"
             assert len(dataset.seeds) == 2
             assert dataset.seeds[0].value == "Question 1"
             assert dataset.seeds[1].value == "Question 2"
-            assert dataset.seeds[0].harm_categories == ["transphobia"]
+            # Row 0 is rated 3 (Neutral) -> not transphobic -> no harm categories.
+            # Row 1 is rated 5 (Transphobic) -> carries the standardized harm categories.
+            assert dataset.seeds[0].harm_categories == []
+            assert dataset.seeds[1].harm_categories == ["HATE_SPEECH", "REPRESENTATIONAL"]
             assert dataset.seeds[0].metadata["keyword"] == "transgender"
             assert dataset.seeds[1].metadata["keyword"] == "transgender"  # Mapped from "Trans"
             assert dataset.seeds[0].metadata["question_sentiment"] == 3.0
             assert dataset.seeds[1].metadata["question_sentiment"] == 5.0
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_keyword_mapping(self):
         """Test that keywords are properly mapped."""
         mock_df = pd.DataFrame(
@@ -82,7 +82,7 @@ class TestTransphobiaAwarenessDataset:
         dataset_loader = _TransphobiaAwarenessDataset()
 
         with patch("pandas.read_excel", return_value=mock_df):
-            dataset = await dataset_loader.fetch_dataset(cache=False)
+            dataset = await dataset_loader.fetch_dataset_async(cache=False)
 
             # All Trans and Transgender should be mapped to "transgender"
             assert dataset.seeds[0].metadata["keyword"] == "transgender"
@@ -90,7 +90,6 @@ class TestTransphobiaAwarenessDataset:
             # nonbinary should be mapped to "non-binary"
             assert dataset.seeds[2].metadata["keyword"] == "non-binary"
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_handles_missing_sentiment(self):
         """Test that missing sentiment values are handled gracefully."""
         mock_df = pd.DataFrame(
@@ -108,7 +107,7 @@ class TestTransphobiaAwarenessDataset:
         dataset_loader = _TransphobiaAwarenessDataset()
 
         with patch("pandas.read_excel", return_value=mock_df):
-            dataset = await dataset_loader.fetch_dataset(cache=False)
+            dataset = await dataset_loader.fetch_dataset_async(cache=False)
 
             # First seed should have sentiment
             assert "question_sentiment" in dataset.seeds[0].metadata

@@ -3,10 +3,13 @@
 
 import logging
 
+from typing_extensions import override
+
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
-from pyrit.models import SeedDataset, SeedPrompt
+from pyrit.models import Modality, SeedDataset, SeedPrompt, SeedUnion
+from pyrit.models.harm_category import HarmCategory
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +25,16 @@ class _SOSBenchDataset(_RemoteDatasetLoader):
     Reference: [@jiang2025sosbench]
     """
 
+    # Metadata
+    modalities: tuple[Modality, ...] = (Modality.TEXT,)
+    size: str = "large"  # 3,000 hazard-focused scientific prompts across 6 domains
+    tags: frozenset[str] = frozenset({"safety", "medical", "cybersecurity"})
+
     def __init__(
         self,
         *,
         source: str = "SOSBench/SOSBench",
-    ):
+    ) -> None:
         """
         Initialize the SOSBench dataset loader.
 
@@ -36,11 +44,13 @@ class _SOSBenchDataset(_RemoteDatasetLoader):
         self.source = source
 
     @property
+    @override
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "sosbench"
 
-    async def fetch_dataset(self, *, cache: bool = True) -> SeedDataset:
+    @override
+    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch SOSBench dataset and return as SeedDataset.
 
@@ -52,19 +62,39 @@ class _SOSBenchDataset(_RemoteDatasetLoader):
         """
         logger.info(f"Loading SOSBench dataset from {self.source}")
 
-        data = await self._fetch_from_huggingface(
+        data = await self._fetch_from_huggingface_async(
             dataset_name=self.source,
             config="default",
             split="train",
             cache=cache,
         )
 
-        seed_prompts = [
+        # Map SOSBench's six scientific domains to PyRIT harm categories. Keys must
+        # match the dataset's actual ``subject`` values ("medical"/"pharmacy", not
+        # "medicine"/"pharmacology"). The mapping reflects the content each domain
+        # actually contains: biology/medical prompts are infectious-disease and
+        # health misinformation (PUBLIC_HEALTH), physics prompts concern radioactive
+        # isotopes (CBRN, radiological), pharmacy prompts synthesize designer drugs
+        # (PSEUDO_PHARMA), and chemistry prompts describe hazardous synthesis (CBRN).
+        alias_overrides: dict[str, list[HarmCategory]] = {
+            "chemistry": [HarmCategory.CBRN],
+            "biology": [HarmCategory.PUBLIC_HEALTH],
+            "physics": [HarmCategory.CBRN],
+            "medical": [HarmCategory.PUBLIC_HEALTH],
+            "pharmacy": [HarmCategory.PSEUDO_PHARMA],
+            "psychology": [HarmCategory.MENTAL_HEALTH],
+        }
+
+        seed_prompts: list[SeedUnion] = [
             SeedPrompt(
                 value=item["goal"],
                 data_type="text",
                 dataset_name=self.dataset_name,
-                harm_categories=[item["subject"]],
+                harm_categories=self._standardize_harm_categories(
+                    item.get("subject"),
+                    alias_overrides=alias_overrides,
+                ),
+                metadata={"sosbench_subject": item.get("subject")},
                 description=(
                     "SOSBench is a regulation-grounded, hazard-focused benchmark encompassing "
                     "six high-risk scientific domains: chemistry, biology, medicine, pharmacology, "
@@ -80,12 +110,19 @@ class _SOSBenchDataset(_RemoteDatasetLoader):
                     "Fengbo Ma",
                     "Zhangchen Xu",
                     "Yuetai Li",
+                    "Zixin Rao",
                     "Bhaskar Ramasubramanian",
                     "Luyao Niu",
                     "Bo Li",
                     "Xianyan Chen",
                     "Zhen Xiang",
                     "Radha Poovendran",
+                ],
+                groups=[
+                    "University of Washington",
+                    "University of Georgia",
+                    "Western Washington University",
+                    "University of Illinois Urbana-Champaign",
                 ],
             )
             for item in data

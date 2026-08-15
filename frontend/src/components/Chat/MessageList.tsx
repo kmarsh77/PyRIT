@@ -8,9 +8,11 @@ import {
   Button,
   Tooltip,
   Spinner,
+  mergeClasses,
 } from '@fluentui/react-components'
-import { ArrowDownloadRegular, ArrowReplyRegular, ArrowForwardRegular, ChatAddRegular, BranchForkRegular } from '@fluentui/react-icons'
+import { ArrowDownloadRegular, ArrowReplyRegular, ArrowForwardRegular, ChatAddRegular, BranchForkRegular, OpenRegular } from '@fluentui/react-icons'
 import { Message, MessageAttachment } from '../../types'
+import MarkdownContent from './MarkdownContent'
 import { useMessageListStyles } from './MessageList.styles'
 
 interface MessageListProps {
@@ -33,6 +35,8 @@ interface MessageListProps {
   isCrossTarget?: boolean
   /** True when no target is currently selected */
   noTargetSelected?: boolean
+  /** Conversation-wide default: render message text as Markdown. */
+  globalMarkdown?: boolean
 }
 
 /** Image that shows a spinner while loading. */
@@ -77,10 +81,34 @@ function MediaWithFallback({ type, src, className }: { type: 'video' | 'audio'; 
   if (type === 'video') {
     return <video src={src} controls className={className} onError={handleError} data-testid="video-player" />
   }
-  return <audio src={src} controls onError={handleError} data-testid="audio-player" />
+  return <audio src={src} controls className={className} onError={handleError} data-testid="audio-player" />
 }
 
-export default function MessageList({ messages, onCopyToInput, onCopyToNewConversation, onBranchConversation, onBranchAttack, isLoading, isSingleTurn, isOperatorLocked, isCrossTarget, noTargetSelected }: MessageListProps) {
+/**
+ * If the trimmed text is a JSON object or array, return a 2-space pretty-printed
+ * version of it; otherwise return null. Used to render structured assistant
+ * responses (e.g. PromptShield verdicts) as readable JSON instead of a single
+ * line of compact text.
+ */
+function tryFormatJson(text: string): string | null {
+  const trimmed = text.trim()
+  if (!trimmed) return null
+  const first = trimmed[0]
+  const last = trimmed[trimmed.length - 1]
+  // Cheap pre-check: only attempt parsing for object- or array-shaped content
+  // so things like "1" or "true" (which are valid JSON) are still rendered as
+  // plain text.
+  if (!((first === '{' && last === '}') || (first === '[' && last === ']'))) {
+    return null
+  }
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2)
+  } catch {
+    return null
+  }
+}
+
+export default function MessageList({ messages, onCopyToInput, onCopyToNewConversation, onBranchConversation, onBranchAttack, isLoading, isSingleTurn, isOperatorLocked, isCrossTarget, noTargetSelected, globalMarkdown = false }: MessageListProps) {
   const styles = useMessageListStyles()
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -119,17 +147,17 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
   if (messages.length === 0) {
     return (
       <div className={styles.emptyState}>
-        <Text size={500} weight="semibold">Welcome to PyRIT</Text>
         <Text size={300} style={{ color: tokens.colorNeutralForeground3 }}>
-          Start a conversation to test AI safety and robustness
+          There are no messages in this conversation yet.
         </Text>
       </div>
     )
   }
 
   return (
-    <div className={styles.root}>
+    <div className={styles.root} data-testid="message-list">
       {messages.map((message, index) => {
+        if (message.role === 'system') return null
         const isUser = message.role === 'user'
         const isSimulated = message.role === 'simulated_assistant'
         const timestamp = new Date(message.timestamp).toLocaleTimeString()
@@ -138,13 +166,16 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
         return (
           <div
             key={index}
-            className={`${styles.message} ${isUser ? styles.userMessage : ''}`}
+            className={mergeClasses(styles.message, isUser && styles.userMessage)}
           >
             <Avatar
               name={avatarName}
               color={isUser ? 'colorful' : isSimulated ? 'steel' : 'brand'}
             />
-            <div className={`${styles.messageContent} ${isUser ? styles.userMessageContent : ''}`}>
+            <div
+              className={mergeClasses(styles.messageContent, isUser && styles.userMessageContent)}
+              data-testid={`message-bubble-${index}`}
+            >
               {/* Error rendering */}
               {message.error && (
                 <div className={styles.errorContainer}>
@@ -181,10 +212,10 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                   {message.originalAttachments && message.originalAttachments.length > 0 && (
                     <div className={styles.attachmentsContainer}>
                       {message.originalAttachments.map((att, i) => (
-                        <div key={i}>
+                        <div key={i} className={styles.attachmentItem}>
                           {att.type === 'image' && <ImageWithSpinner src={att.url} alt={att.name} className={styles.attachmentPreview} hiddenClassName={styles.attachmentPreviewHidden} containerClassName={styles.imageContainer} spinnerClassName={styles.imageSpinner} />}
                           {att.type === 'video' && <MediaWithFallback type="video" src={att.url} className={styles.videoPreview} />}
-                          {att.type === 'audio' && <MediaWithFallback type="audio" src={att.url} />}
+                          {att.type === 'audio' && <MediaWithFallback type="audio" src={att.url} className={styles.audioPreview} />}
                           {att.type === 'file' && <div className={styles.attachmentFile}><Text size={200}>📄 {att.name}</Text></div>}
                         </div>
                       ))}
@@ -204,17 +235,48 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
               )}
 
               {/* Text content (converted / primary) */}
-              {message.content && (
-                <Text className={message.isLoading ? styles.loadingEllipsis : styles.messageText}>
-                  {message.content}
-                </Text>
-              )}
+              {message.content && (() => {
+                if (message.isLoading) {
+                  return (
+                    <Text className={styles.loadingEllipsis}>
+                      {message.content}
+                    </Text>
+                  )
+                }
+                // When Markdown rendering is enabled, it takes precedence over
+                // the JSON auto-format below.
+                if (globalMarkdown) {
+                  return (
+                    <MarkdownContent
+                      content={message.content}
+                      testId={`message-markdown-${index}`}
+                    />
+                  )
+                }
+                // For assistant / simulated_assistant messages, detect
+                // structured JSON responses (e.g. PromptShield verdicts) and
+                // render them pretty-printed inside a <pre> so the user can
+                // actually read them. User-typed JSON is left as-is.
+                const formatted = !isUser ? tryFormatJson(message.content) : null
+                if (formatted !== null) {
+                  return (
+                    <pre className={styles.messageJsonBlock} data-testid={`message-json-${index}`}>
+                      {formatted}
+                    </pre>
+                  )
+                }
+                return (
+                  <Text className={styles.messageText}>
+                    {message.content}
+                  </Text>
+                )
+              })()}
 
               {/* Attachments (images, audio, video, files) */}
               {message.attachments && message.attachments.length > 0 && (
                 <div className={styles.attachmentsContainer}>
                   {message.attachments.map((att, attIndex) => (
-                    <div key={attIndex}>
+                    <div key={attIndex} className={styles.attachmentItem}>
                       {att.type === 'image' && (
                         <ImageWithSpinner
                           src={att.url}
@@ -229,11 +291,25 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                         <MediaWithFallback type="video" src={att.url} className={styles.videoPreview} />
                       )}
                       {att.type === 'audio' && (
-                        <MediaWithFallback type="audio" src={att.url} />
+                        <MediaWithFallback type="audio" src={att.url} className={styles.audioPreview} />
                       )}
                       {att.type === 'file' && (
                         <div className={styles.attachmentFile}>
-                          <Text size={200}>📄 {att.name}</Text>
+                          <Text size={200} className={styles.attachmentFileName}>📄 {att.name}</Text>
+                          {att.url && (
+                            <Tooltip content="Open in new tab" relationship="label">
+                              <a
+                                href={att.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={styles.attachmentOpenLink}
+                                data-testid={`attachment-open-${index}-${attIndex}`}
+                              >
+                                <OpenRegular fontSize={14} />
+                                <span>Open</span>
+                              </a>
+                            </Tooltip>
+                          )}
                         </div>
                       )}
                     </div>
@@ -248,13 +324,13 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                   {onCopyToInput && (() => {
                     const disabled = Boolean(noTargetSelected || isSingleTurn || isOperatorLocked || isCrossTarget)
                     const tip = noTargetSelected
-                      ? 'Cannot copy — no target selected'
+                      ? 'Cannot copy to this conversation — no target selected'
                       : isSingleTurn
-                        ? 'Cannot copy — target is single-turn'
+                        ? 'Cannot copy to this conversation — target is single-turn'
                         : isOperatorLocked
-                          ? 'Cannot copy — you are not the operator of this attack'
+                          ? 'Cannot copy to this conversation — you are not the operator of this attack'
                           : isCrossTarget
-                            ? 'Cannot copy — conversation used a different target'
+                            ? 'Cannot copy to this conversation — it used a different target'
                             : 'Copy to input box in this conversation'
                     return (
                       <Tooltip content={tip} relationship="label">
@@ -265,7 +341,7 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                           disabled={disabled}
                           onClick={() => onCopyToInput(index)}
                           data-testid={`copy-to-input-btn-${index}`}
-                          style={{ minWidth: 'auto', padding: '2px' }}
+                          className={styles.messageActionButton}
                         />
                       </Tooltip>
                     )
@@ -275,11 +351,11 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                   {onCopyToNewConversation && (() => {
                     const disabled = Boolean(noTargetSelected || isOperatorLocked || isCrossTarget)
                     const tip = noTargetSelected
-                      ? 'Cannot copy — no target selected'
+                      ? 'Cannot copy to a new conversation — no target selected'
                       : isOperatorLocked
-                        ? 'Cannot add to this attack — you are not the operator'
+                        ? 'Cannot copy to a new conversation — you are not the operator of this attack'
                         : isCrossTarget
-                          ? 'Cannot add to this attack — conversation used a different target'
+                          ? 'Cannot copy to a new conversation — this attack used a different target'
                           : 'Copy to input box in a new conversation'
                     return (
                       <Tooltip content={tip} relationship="label">
@@ -290,7 +366,7 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                           disabled={disabled}
                           onClick={() => onCopyToNewConversation(index)}
                           data-testid={`copy-to-new-conv-btn-${index}`}
-                          style={{ minWidth: 'auto', padding: '2px' }}
+                          className={styles.messageActionButton}
                         />
                       </Tooltip>
                     )
@@ -300,13 +376,13 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                   {onBranchConversation && (() => {
                     const disabled = Boolean(noTargetSelected || isSingleTurn || isOperatorLocked || isCrossTarget)
                     const tip = noTargetSelected
-                      ? 'Cannot branch — no target selected'
+                      ? 'Cannot branch into new conversation — no target selected'
                       : isSingleTurn
-                        ? 'Cannot branch — target is single-turn'
+                        ? 'Cannot branch into new conversation — target is single-turn'
                         : isOperatorLocked
-                          ? 'Cannot add to this attack — you are not the operator'
+                          ? 'Cannot branch into new conversation — you are not the operator of this attack'
                           : isCrossTarget
-                            ? 'Cannot add to this attack — conversation used a different target'
+                            ? 'Cannot branch into new conversation — this attack used a different target'
                             : 'Branch into new conversation'
                     return (
                       <Tooltip content={tip} relationship="label">
@@ -317,7 +393,7 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                           disabled={disabled}
                           onClick={() => onBranchConversation(index)}
                           data-testid={`branch-conv-btn-${index}`}
-                          style={{ minWidth: 'auto', padding: '2px' }}
+                          className={styles.messageActionButton}
                         />
                       </Tooltip>
                     )
@@ -335,16 +411,16 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                             icon={<ChatAddRegular />}
                             onClick={() => onBranchAttack(index)}
                             data-testid={`branch-attack-btn-${index}`}
-                            style={{ minWidth: 'auto', padding: '2px' }}
+                            className={styles.messageActionButton}
                           />
                         </Tooltip>
                       )
                     }
                     // Show disabled button with reason
                     const tip = noTargetSelected
-                      ? 'Cannot branch — no target selected'
+                      ? 'Cannot branch into new attack — no target selected'
                       : singleTurnBlock
-                        ? 'Cannot branch — target is single-turn'
+                        ? 'Cannot branch into new attack — target is single-turn'
                         : undefined
                     if (!tip) return null
                     return (
@@ -355,7 +431,7 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                           icon={<ChatAddRegular />}
                           disabled
                           data-testid={`branch-attack-btn-${index}`}
-                          style={{ minWidth: 'auto', padding: '2px' }}
+                          className={styles.messageActionButton}
                         />
                       </Tooltip>
                     )
@@ -370,7 +446,7 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                         icon={<ArrowDownloadRegular />}
                         onClick={() => handleDownload(att)}
                         data-testid={`download-btn-${index}-${ai}`}
-                        style={{ minWidth: 'auto', padding: '2px' }}
+                        className={styles.messageActionButton}
                       />
                     </Tooltip>
                   ))}

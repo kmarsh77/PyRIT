@@ -10,7 +10,7 @@ from pyrit.prompt_target import OpenAIChatTarget
 from pyrit.registry import ScorerRegistry, TargetRegistry
 from pyrit.score import LikertScalePaths
 from pyrit.setup.initializers import ScorerInitializer
-from pyrit.setup.initializers.components.scorers import (
+from pyrit.setup.initializers.scorers import (
     GPT4O_TARGET,
     GPT4O_TEMP0_TARGET,
     GPT4O_TEMP9_TARGET,
@@ -30,7 +30,6 @@ class TestScorerInitializerBasic:
         """Test that ScorerInitializer can be instantiated."""
         init = ScorerInitializer()
         assert init is not None
-        assert init.name == "Scorer Initializer"
 
     def test_required_env_vars_is_empty(self) -> None:
         """Test that required env vars is empty (handles missing targets gracefully)."""
@@ -42,11 +41,6 @@ class TestScorerInitializerBasic:
         init = ScorerInitializer()
         assert isinstance(init.description, str)
         assert len(init.description) > 0
-
-    def test_execution_order_is_two(self) -> None:
-        """Test that execution_order is 2 (runs after target initializer)."""
-        init = ScorerInitializer()
-        assert init.execution_order == 2
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -60,14 +54,14 @@ class TestScorerInitializerInitialize:
 
     def setup_method(self) -> None:
         """Reset registries before each test."""
-        ScorerRegistry.reset_instance()
-        TargetRegistry.reset_instance()
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
         self._clear_env_vars()
 
     def teardown_method(self) -> None:
         """Clean up after each test."""
-        ScorerRegistry.reset_instance()
-        TargetRegistry.reset_instance()
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
         self._clear_env_vars()
 
     def _clear_env_vars(self) -> None:
@@ -76,16 +70,29 @@ class TestScorerInitializerInitialize:
             if var in os.environ:
                 del os.environ[var]
 
-    def _register_mock_target(self, *, name: str) -> OpenAIChatTarget:
+    def _register_mock_target(self, *, name: str, underlying_model: str = "gpt-4o") -> OpenAIChatTarget:
         """Register a mock OpenAIChatTarget in the TargetRegistry."""
+        from pyrit.models.identifiers import ComponentIdentifier
+
         target = MagicMock(spec=OpenAIChatTarget)
         target._temperature = None
         target._endpoint = f"https://test-{name}.openai.azure.com"
         target._api_key = "test_key"
         target._model_name = "test-model"
-        target._underlying_model = "gpt-4o"
+        target._underlying_model = underlying_model
+        # _get_chat_target_prefer_rr computes the RR name from the target's identifier
+        target.get_identifier.return_value = ComponentIdentifier(
+            class_name="OpenAIChatTarget",
+            class_module="pyrit.prompt_target.openai.openai_chat_target",
+            params={
+                "underlying_model_name": underlying_model,
+                "model_name": "test-model",
+                "temperature": None,
+                "top_p": None,
+            },
+        )
         registry = TargetRegistry.get_registry_singleton()
-        registry.register_instance(target, name=name)
+        registry.instances.register(target, name=name)
         return target
 
     def _register_all_scorer_targets(self) -> None:
@@ -99,14 +106,12 @@ class TestScorerInitializerInitialize:
         self._register_mock_target(name=GPT5_4_TARGET)
         self._register_mock_target(name=GPT5_1_TARGET)
 
-    @pytest.mark.asyncio
     async def test_raises_when_target_registry_empty(self) -> None:
         """Test that initialize raises RuntimeError when TargetRegistry is empty."""
         init = ScorerInitializer()
         with pytest.raises(RuntimeError, match="TargetRegistry is empty"):
             await init.initialize_async()
 
-    @pytest.mark.asyncio
     async def test_registers_all_scorer_variants(self) -> None:
         """Test that all scorer variants are registered when all targets are available."""
         self._register_all_scorer_targets()
@@ -116,9 +121,8 @@ class TestScorerInitializerInitialize:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        assert len(registry) == 28
+        assert len(registry.instances) == 28
 
-    @pytest.mark.asyncio
     async def test_registers_gpt4o_scorers_when_only_gpt4o_targets(self) -> None:
         """Test that GPT4O-based scorers register when only GPT4O targets are available."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -129,11 +133,10 @@ class TestScorerInitializerInitialize:
 
         registry = ScorerRegistry.get_registry_singleton()
         # Normal mode: falls back to gpt4o refusal
-        assert registry.get_instance_by_name("refusal_gpt4o_objective_strict") is not None
+        assert registry.instances.get("refusal_gpt4o_objective_strict") is not None
         # inverted_refusal uses the gpt4o refusal fallback
-        assert registry.get_instance_by_name("inverted_refusal") is not None
+        assert registry.instances.get("inverted_refusal") is not None
 
-    @pytest.mark.asyncio
     async def test_refusal_scorers_registered(self) -> None:
         """Test that refusal scorers are registered when gpt4o target is available."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -142,11 +145,10 @@ class TestScorerInitializerInitialize:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        refusal_entries = registry.get_by_tag(tag=ScorerInitializerTags.REFUSAL)
+        refusal_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.REFUSAL)
         # 4 gpt4o prompt-template variants (gpt5_4, gpt5_1, unsafe skipped)
         assert len(refusal_entries) == 4
 
-    @pytest.mark.asyncio
     async def test_acs_scorers_registered_when_env_vars_set(self) -> None:
         """Test that ACS scorers register when env vars are set."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -157,13 +159,12 @@ class TestScorerInitializerInitialize:
 
         registry = ScorerRegistry.get_registry_singleton()
         # 3 threshold + 4 harm = 7 ACS total
-        assert registry.get_instance_by_name("acs_threshold_05") is not None
-        assert registry.get_instance_by_name("acs_hate") is not None
+        assert registry.instances.get("acs_threshold_05") is not None
+        assert registry.instances.get("acs_hate") is not None
 
-        acs_entries = registry.get_by_tag(tag=ScorerInitializerTags.ACS)
+        acs_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.ACS)
         assert len(acs_entries) == 7
 
-    @pytest.mark.asyncio
     async def test_acs_scorers_skipped_without_env_vars(self) -> None:
         """Test that ACS scorers are skipped when content safety env vars are missing."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -172,11 +173,10 @@ class TestScorerInitializerInitialize:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        assert registry.get_instance_by_name("acs_threshold_01") is None
-        assert registry.get_instance_by_name("acs_threshold_05") is None
-        assert registry.get_instance_by_name("acs_hate") is None
+        assert registry.instances.get("acs_threshold_01") is None
+        assert registry.instances.get("acs_threshold_05") is None
+        assert registry.instances.get("acs_hate") is None
 
-    @pytest.mark.asyncio
     async def test_likert_scorers_registered(self) -> None:
         """Test that likert scorers are registered for LikertScalePaths with evaluation files."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -188,10 +188,9 @@ class TestScorerInitializerInitialize:
         for scale in LikertScalePaths:
             if scale.evaluation_files is not None:
                 expected_name = f"likert_{scale.name.lower().removesuffix('_scale')}_gpt4o"
-                scorer = registry.get_instance_by_name(expected_name)
+                scorer = registry.instances.get(expected_name)
                 assert scorer is not None, f"Likert scorer '{expected_name}' not found in registry"
 
-    @pytest.mark.asyncio
     async def test_gracefully_skips_scorers_with_missing_target(self) -> None:
         """Test that scorers are skipped with a warning when their target is not in the registry."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -201,13 +200,12 @@ class TestScorerInitializerInitialize:
 
         registry = ScorerRegistry.get_registry_singleton()
         # Refusal variants requiring missing targets should be skipped
-        assert registry.get_instance_by_name("refusal_gpt5_4") is None
-        assert registry.get_instance_by_name("refusal_gpt5_1") is None
-        assert registry.get_instance_by_name("refusal_gpt4o_unsafe") is None
+        assert registry.instances.get("refusal_gpt5_4") is None
+        assert registry.instances.get("refusal_gpt5_1") is None
+        assert registry.instances.get("refusal_gpt4o_unsafe") is None
         # But gpt4o-based ones should register
-        assert registry.get_instance_by_name("refusal_gpt4o_objective_lenient") is not None
+        assert registry.instances.get("refusal_gpt4o_objective_lenient") is not None
 
-    @pytest.mark.asyncio
     async def test_default_tag_registers_all_current_scorers(self) -> None:
         """Test that default tag registers all current scorers."""
         self._register_all_scorer_targets()
@@ -218,28 +216,20 @@ class TestScorerInitializerInitialize:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        assert len(registry) == 28
+        assert len(registry.instances) == 28
 
 
 class TestScorerInitializerGetInfo:
     """Tests for ScorerInitializer.get_info_async method."""
 
-    @pytest.mark.asyncio
     async def test_get_info_returns_expected_structure(self) -> None:
         """Test that get_info_async returns expected structure."""
         info = await ScorerInitializer.get_info_async()
 
         assert isinstance(info, dict)
-        assert info["name"] == "Scorer Initializer"
         assert info["class"] == "ScorerInitializer"
         assert "description" in info
         assert isinstance(info["description"], str)
-
-    @pytest.mark.asyncio
-    async def test_get_info_execution_order_is_two(self) -> None:
-        """Test that get_info reports execution_order of 2."""
-        info = await ScorerInitializer.get_info_async()
-        assert info["execution_order"] == 2
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -248,28 +238,39 @@ class TestScorerInitializerBestObjective:
 
     def setup_method(self) -> None:
         """Reset registries before each test."""
-        ScorerRegistry.reset_instance()
-        TargetRegistry.reset_instance()
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
 
     def teardown_method(self) -> None:
         """Clean up after each test."""
-        ScorerRegistry.reset_instance()
-        TargetRegistry.reset_instance()
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
 
-    def _register_mock_target(self, *, name: str) -> OpenAIChatTarget:
+    def _register_mock_target(self, *, name: str, underlying_model: str = "gpt-4o") -> OpenAIChatTarget:
         """Register a mock OpenAIChatTarget in the TargetRegistry."""
+        from pyrit.models.identifiers import ComponentIdentifier
+
         target = MagicMock(spec=OpenAIChatTarget)
         target._temperature = None
         target._endpoint = f"https://test-{name}.openai.azure.com"
         target._api_key = "test_key"
         target._model_name = "test-model"
-        target._underlying_model = "gpt-4o"
+        target._underlying_model = underlying_model
+        target.get_identifier.return_value = ComponentIdentifier(
+            class_name="OpenAIChatTarget",
+            class_module="pyrit.prompt_target.openai.openai_chat_target",
+            params={
+                "underlying_model_name": underlying_model,
+                "model_name": "test-model",
+                "temperature": None,
+                "top_p": None,
+            },
+        )
         registry = TargetRegistry.get_registry_singleton()
-        registry.register_instance(target, name=name)
+        registry.instances.register(target, name=name)
         return target
 
-    @pytest.mark.asyncio
-    @patch("pyrit.setup.initializers.components.scorers.find_objective_metrics_by_eval_hash")
+    @patch("pyrit.setup.initializers.scorers.find_objective_metrics_by_eval_hash")
     async def test_best_objective_tags_best_scorer(self, mock_find_metrics) -> None:
         """Test that _tag_best_objective tags the scorer with highest F1."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -282,11 +283,10 @@ class TestScorerInitializerBestObjective:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        results = registry.get_by_tag(tag=ScorerInitializerTags.BEST_OBJECTIVE)
+        results = registry.instances.get_by_tag(tag=ScorerInitializerTags.BEST_OBJECTIVE)
         assert len(results) >= 1
 
-    @pytest.mark.asyncio
-    @patch("pyrit.setup.initializers.components.scorers.find_objective_metrics_by_eval_hash")
+    @patch("pyrit.setup.initializers.scorers.find_objective_metrics_by_eval_hash")
     async def test_best_objective_no_metrics_falls_back_to_category(self, mock_find_metrics) -> None:
         """Test that best objective falls back to composite category when no metrics."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -297,16 +297,15 @@ class TestScorerInitializerBestObjective:
 
         registry = ScorerRegistry.get_registry_singleton()
         # Should fall back to tagging a composite scorer as best_objective
-        results = registry.get_by_tag(tag=ScorerInitializerTags.BEST_OBJECTIVE)
+        results = registry.instances.get_by_tag(tag=ScorerInitializerTags.BEST_OBJECTIVE)
         # Falls back to first composite if available (inverted_refusal)
-        composite_entries = registry.get_by_tag(tag=ScorerInitializerTags.OBJECTIVE_COMPOSITE)
+        composite_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.OBJECTIVE_COMPOSITE)
         if composite_entries:
             assert len(results) >= 1
         else:
             assert len(results) == 0
 
-    @pytest.mark.asyncio
-    @patch("pyrit.setup.initializers.components.scorers.find_objective_metrics_by_eval_hash")
+    @patch("pyrit.setup.initializers.scorers.find_objective_metrics_by_eval_hash")
     async def test_best_objective_picks_highest_f1(self, mock_find_metrics) -> None:
         """Test that the scorer with the highest F1 score gets tagged."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -326,12 +325,11 @@ class TestScorerInitializerBestObjective:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        results = registry.get_by_tag(tag=ScorerInitializerTags.BEST_OBJECTIVE)
+        results = registry.instances.get_by_tag(tag=ScorerInitializerTags.BEST_OBJECTIVE)
         assert len(results) == 1
         assert ScorerInitializerTags.DEFAULT_OBJECTIVE_SCORER in results[0].tags
 
-    @pytest.mark.asyncio
-    @patch("pyrit.setup.initializers.components.scorers.find_objective_metrics_by_eval_hash")
+    @patch("pyrit.setup.initializers.scorers.find_objective_metrics_by_eval_hash")
     async def test_best_objective_does_not_add_extra_entry(self, mock_find_metrics) -> None:
         """Test that tagging best objective doesn't increase registry count."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -344,11 +342,11 @@ class TestScorerInitializerBestObjective:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        count_with_tag = len(registry)
+        count_with_tag = len(registry.instances)
 
         # Reset and run without metrics to get baseline count
-        ScorerRegistry.reset_instance()
-        TargetRegistry.reset_instance()
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
         self._register_mock_target(name=GPT4O_TARGET)
         mock_find_metrics.return_value = None
 
@@ -356,7 +354,7 @@ class TestScorerInitializerBestObjective:
         await init2.initialize_async()
 
         registry2 = ScorerRegistry.get_registry_singleton()
-        count_without_tag = len(registry2)
+        count_without_tag = len(registry2.instances)
 
         assert count_with_tag == count_without_tag
 
@@ -371,28 +369,39 @@ class TestScorerInitializerCategoryTags:
     }
 
     def setup_method(self) -> None:
-        ScorerRegistry.reset_instance()
-        TargetRegistry.reset_instance()
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
 
     def teardown_method(self) -> None:
-        ScorerRegistry.reset_instance()
-        TargetRegistry.reset_instance()
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
         for var in self.CONTENT_SAFETY_ENV_VARS:
             os.environ.pop(var, None)
 
-    def _register_mock_target(self, *, name: str) -> OpenAIChatTarget:
+    def _register_mock_target(self, *, name: str, underlying_model: str = "gpt-4o") -> OpenAIChatTarget:
         """Register a mock OpenAIChatTarget in the TargetRegistry."""
+        from pyrit.models.identifiers import ComponentIdentifier
+
         target = MagicMock(spec=OpenAIChatTarget)
         target._temperature = None
         target._endpoint = f"https://test-{name}.openai.azure.com"
         target._api_key = "test_key"
         target._model_name = "test-model"
-        target._underlying_model = "gpt-4o"
+        target._underlying_model = underlying_model
+        target.get_identifier.return_value = ComponentIdentifier(
+            class_name="OpenAIChatTarget",
+            class_module="pyrit.prompt_target.openai.openai_chat_target",
+            params={
+                "underlying_model_name": underlying_model,
+                "model_name": "test-model",
+                "temperature": None,
+                "top_p": None,
+            },
+        )
         registry = TargetRegistry.get_registry_singleton()
-        registry.register_instance(target, name=name)
+        registry.instances.register(target, name=name)
         return target
 
-    @pytest.mark.asyncio
     async def test_scale_scorers_tagged_with_scale_category(self) -> None:
         """Test that scale scorers get the SCALE category tag."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -402,10 +411,9 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        scale_entries = registry.get_by_tag(tag=ScorerInitializerTags.SCALE)
+        scale_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.SCALE)
         assert len(scale_entries) >= 1
 
-    @pytest.mark.asyncio
     async def test_acs_threshold_scorers_tagged_separately(self) -> None:
         """Test that ACS threshold scorers get both ACS and ACS_THRESHOLD tags."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -415,12 +423,11 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        threshold_entries = registry.get_by_tag(tag=ScorerInitializerTags.ACS_THRESHOLD)
+        threshold_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.ACS_THRESHOLD)
         assert len(threshold_entries) == 3
         for entry in threshold_entries:
             assert ScorerInitializerTags.ACS in entry.tags
 
-    @pytest.mark.asyncio
     async def test_acs_harm_scorers_tagged_separately(self) -> None:
         """Test that ACS harm scorers get both ACS and ACS_HARM tags."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -430,12 +437,11 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        harm_entries = registry.get_by_tag(tag=ScorerInitializerTags.ACS_HARM)
+        harm_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.ACS_HARM)
         assert len(harm_entries) == 4
         for entry in harm_entries:
             assert ScorerInitializerTags.ACS in entry.tags
 
-    @pytest.mark.asyncio
     async def test_likert_scorers_tagged_with_likert_category(self) -> None:
         """Test that likert scorers get the LIKERT category tag."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -444,11 +450,10 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        likert_entries = registry.get_by_tag(tag=ScorerInitializerTags.LIKERT)
+        likert_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.LIKERT)
         expected_count = sum(1 for s in LikertScalePaths if s.evaluation_files is not None)
         assert len(likert_entries) == expected_count
 
-    @pytest.mark.asyncio
     async def test_task_achieved_scorers_tagged(self) -> None:
         """Test that multiple task_achieved variants are registered."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -458,10 +463,9 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        task_entries = registry.get_by_tag(tag=ScorerInitializerTags.TASK_ACHIEVED)
+        task_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.TASK_ACHIEVED)
         assert len(task_entries) == 2
 
-    @pytest.mark.asyncio
     async def test_composite_scorers_tagged(self) -> None:
         """Test that compound objective scorers get the OBJECTIVE_COMPOSITE tag."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -471,10 +475,9 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        composite_entries = registry.get_by_tag(tag=ScorerInitializerTags.OBJECTIVE_COMPOSITE)
+        composite_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.OBJECTIVE_COMPOSITE)
         assert len(composite_entries) >= 1
 
-    @pytest.mark.asyncio
     async def test_best_refusal_tags_preferred_scorer(self) -> None:
         """Test that BEST_REFUSAL tags the preferred refusal scorer when available."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -484,11 +487,10 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        best = registry.get_by_tag(tag=ScorerInitializerTags.BEST_REFUSAL)
+        best = registry.instances.get_by_tag(tag=ScorerInitializerTags.BEST_REFUSAL)
         assert len(best) == 1
         assert best[0].name == "refusal_gpt5_4"
 
-    @pytest.mark.asyncio
     async def test_best_refusal_falls_back_when_preferred_missing(self) -> None:
         """Test that BEST_REFUSAL falls back to first available when preferred is missing."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -497,12 +499,11 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        best = registry.get_by_tag(tag=ScorerInitializerTags.BEST_REFUSAL)
+        best = registry.instances.get_by_tag(tag=ScorerInitializerTags.BEST_REFUSAL)
         assert len(best) == 1
         # Should be one of the gpt4o refusal variants
         assert ScorerInitializerTags.REFUSAL in best[0].tags
 
-    @pytest.mark.asyncio
     async def test_best_acs_threshold_tagged(self) -> None:
         """Test that BEST_ACS_THRESHOLD tags the preferred ACS threshold scorer."""
         self._register_mock_target(name=GPT4O_TARGET)
@@ -512,6 +513,134 @@ class TestScorerInitializerCategoryTags:
         await init.initialize_async()
 
         registry = ScorerRegistry.get_registry_singleton()
-        best = registry.get_by_tag(tag=ScorerInitializerTags.BEST_ACS_THRESHOLD)
+        best = registry.instances.get_by_tag(tag=ScorerInitializerTags.BEST_ACS_THRESHOLD)
         assert len(best) == 1
         assert best[0].name == "acs_threshold_05"
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestScorerInitializerRoundRobin:
+    """Tests for ScorerInitializer round-robin target preference via _get_chat_target_prefer_rr."""
+
+    def setup_method(self) -> None:
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
+
+    def teardown_method(self) -> None:
+        ScorerRegistry.reset_registry_singleton()
+        TargetRegistry.reset_registry_singleton()
+
+    def _register_mock_target(self, *, name: str, underlying_model: str = "gpt-4o") -> OpenAIChatTarget:
+        """Register a mock OpenAIChatTarget in the TargetRegistry."""
+        from pyrit.models.identifiers import ComponentIdentifier
+
+        target = MagicMock(spec=OpenAIChatTarget)
+        target._temperature = None
+        target._endpoint = f"https://test-{name}.openai.azure.com"
+        target._api_key = "test_key"
+        target._model_name = "test-model"
+        target._underlying_model = underlying_model
+        # _get_chat_target_prefer_rr computes the RR name from the target's identifier
+        target.get_identifier.return_value = ComponentIdentifier(
+            class_name="OpenAIChatTarget",
+            class_module="pyrit.prompt_target.openai.openai_chat_target",
+            params={
+                "underlying_model_name": underlying_model,
+                "model_name": "test-model",
+                "temperature": None,
+                "top_p": None,
+            },
+        )
+        registry = TargetRegistry.get_registry_singleton()
+        registry.instances.register(target, name=name)
+        return target
+
+    def _register_mock_rr_target(self, *, name: str) -> MagicMock:
+        """Register a mock RoundRobinTarget under the given name."""
+        from pyrit.models.identifiers import ComponentIdentifier
+        from pyrit.prompt_target import RoundRobinTarget
+
+        rr_mock = MagicMock(spec=RoundRobinTarget)
+        rr_mock.get_identifier.return_value = ComponentIdentifier(
+            class_name="RoundRobinTarget",
+            class_module="pyrit.prompt_target.round_robin_target",
+        )
+        registry = TargetRegistry.get_registry_singleton()
+        registry.instances.register(rr_mock, name=name)
+        return rr_mock
+
+    async def test_refusal_unsafe_uses_round_robin_when_available(self) -> None:
+        """Test that refusal_gpt4o_unsafe scorer uses round-robin target wrapping the unsafe target."""
+        self._register_mock_target(name=GPT4O_TARGET)
+        self._register_mock_target(name=GPT4O_UNSAFE_TARGET)
+        rr_mock = self._register_mock_rr_target(name="OpenAIChatTarget_gpt-4o_rr")
+
+        init = ScorerInitializer()
+        await init.initialize_async()
+
+        registry = ScorerRegistry.get_registry_singleton()
+        scorer = registry.instances.get("refusal_gpt4o_unsafe")
+        assert scorer is not None
+        assert scorer._prompt_target is rr_mock
+
+    async def test_refusal_unsafe_falls_back_to_individual_when_no_rr(self) -> None:
+        """Test that refusal_gpt4o_unsafe scorer uses individual target when no RR wraps it."""
+        self._register_mock_target(name=GPT4O_TARGET)
+        individual_mock = self._register_mock_target(name=GPT4O_UNSAFE_TARGET)
+
+        init = ScorerInitializer()
+        await init.initialize_async()
+
+        registry = ScorerRegistry.get_registry_singleton()
+        scorer = registry.instances.get("refusal_gpt4o_unsafe")
+        assert scorer is not None
+        assert scorer._prompt_target is individual_mock
+
+    async def test_refusal_unsafe_skipped_when_target_not_available(self) -> None:
+        """Test that refusal_gpt4o_unsafe is skipped when the unsafe target doesn't exist."""
+        self._register_mock_target(name=GPT4O_TARGET)
+
+        init = ScorerInitializer()
+        await init.initialize_async()
+
+        registry = ScorerRegistry.get_registry_singleton()
+        assert registry.instances.get("refusal_gpt4o_unsafe") is None
+
+    async def test_refusal_gpt4o_uses_round_robin_when_available(self) -> None:
+        """Test that gpt4o-based refusal scorers use round-robin target wrapping gpt4o."""
+        gpt4o_individual = self._register_mock_target(name=GPT4O_TARGET)
+        rr_mock = self._register_mock_rr_target(name="OpenAIChatTarget_gpt-4o_rr")
+
+        init = ScorerInitializer()
+        await init.initialize_async()
+
+        registry = ScorerRegistry.get_registry_singleton()
+        scorer = registry.instances.get("refusal_gpt4o_objective_strict")
+        assert scorer is not None
+        assert scorer._prompt_target is rr_mock
+
+    async def test_refusal_gpt4o_falls_back_to_individual_when_no_rr(self) -> None:
+        """Test that gpt4o-based refusal scorers fall back to individual when no RR exists."""
+        individual_mock = self._register_mock_target(name=GPT4O_TARGET)
+
+        init = ScorerInitializer()
+        await init.initialize_async()
+
+        registry = ScorerRegistry.get_registry_singleton()
+        scorer = registry.instances.get("refusal_gpt4o_objective_strict")
+        assert scorer is not None
+        assert scorer._prompt_target is individual_mock
+
+    async def test_likert_scorers_use_round_robin_when_available(self) -> None:
+        """Test that likert scorers use round-robin target wrapping gpt4o."""
+        gpt4o_individual = self._register_mock_target(name=GPT4O_TARGET)
+        rr_mock = self._register_mock_rr_target(name="OpenAIChatTarget_gpt-4o_rr")
+
+        init = ScorerInitializer()
+        await init.initialize_async()
+
+        registry = ScorerRegistry.get_registry_singleton()
+        likert_entries = registry.instances.get_by_tag(tag=ScorerInitializerTags.LIKERT)
+        assert len(likert_entries) > 0
+        for entry in likert_entries:
+            assert entry.instance._prompt_target is rr_mock

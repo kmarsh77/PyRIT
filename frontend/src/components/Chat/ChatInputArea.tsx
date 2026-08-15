@@ -5,14 +5,24 @@ import {
   Tooltip,
   Text,
   tokens,
+  mergeClasses,
 } from '@fluentui/react-components'
-import { SendRegular, AttachRegular, DismissRegular, InfoRegular, AddRegular, CopyRegular, WarningRegular, SettingsRegular, ArrowShuffleRegular } from '@fluentui/react-icons'
-import { MessageAttachment, TargetInstance } from '../../types'
+import { SendRegular, AttachRegular, DismissRegular, InfoRegular, AddRegular, CopyRegular, WarningRegular, SettingsRegular, ArrowShuffleRegular, OpenRegular, ArrowSyncRegular } from '@fluentui/react-icons'
+import type { AttackTargetResolutionStatus, MessageAttachment, TargetInstance } from '../../types'
+import { isTargetResolutionBlocking } from '../../utils/targetIdentity'
 import { useChatInputAreaStyles } from './ChatInputArea.styles'
+import SystemPromptSetup from './SystemPromptSetup'
+import { PIECE_TYPE_TO_DATA_TYPE } from './converterTypes'
 
 // ---------------------------------------------------------------------------
 // Reusable status banner
 // ---------------------------------------------------------------------------
+
+export interface ConvertedFileChip {
+  name: string
+  url: string
+  iconKind: 'image' | 'audio' | 'video' | 'file'
+}
 
 interface StatusBannerProps {
   icon: React.ReactElement
@@ -24,17 +34,20 @@ interface StatusBannerProps {
   className: string
   textClassName: string
   buttonTestId?: string
+  buttonClassName?: string
+  tourTarget?: string
 }
 
-function StatusBanner({ icon, text, buttonText, buttonIcon, onButtonClick, testId, className, textClassName, buttonTestId }: StatusBannerProps) {
+function StatusBanner({ icon, text, buttonText, buttonIcon, onButtonClick, testId, className, textClassName, buttonTestId, buttonClassName, tourTarget }: StatusBannerProps) {
   return (
-    <div className={className} data-testid={testId}>
+    <div className={className} data-testid={testId} data-tour={tourTarget}>
       {icon}
       <Text className={textClassName} size={300}>
         {text}
       </Text>
       {onButtonClick && buttonText && (
         <Button
+          className={buttonClassName}
           appearance="primary"
           icon={buttonIcon}
           onClick={onButtonClick}
@@ -47,13 +60,109 @@ function StatusBanner({ icon, text, buttonText, buttonIcon, onButtonClick, testI
   )
 }
 
+interface TargetResolutionBannerProps {
+  status: AttackTargetResolutionStatus
+  activeTarget?: TargetInstance | null
+  onRetry?: () => void
+  onConfigureTarget: () => void
+  onUseAsTemplate: () => void
+  styles: ReturnType<typeof useChatInputAreaStyles>
+}
+
+function TargetResolutionBanner({
+  status,
+  activeTarget,
+  onRetry,
+  onConfigureTarget,
+  onUseAsTemplate,
+  styles,
+}: TargetResolutionBannerProps) {
+  if (status === 'loading') {
+    return (
+      <StatusBanner
+        className={styles.statusBanner}
+        textClassName={styles.statusBannerText}
+        icon={<ArrowSyncRegular fontSize={18} />}
+        text="Verifying this attack's target before enabling changes..."
+        testId="target-resolution-loading-banner"
+      />
+    )
+  }
+  if (status === 'error') {
+    return (
+      <StatusBanner
+        className={styles.statusBanner}
+        textClassName={styles.statusBannerText}
+        icon={<WarningRegular fontSize={18} />}
+        text="Target verification failed. This conversation remains read-only."
+        buttonText="Retry"
+        buttonIcon={<ArrowSyncRegular />}
+        onButtonClick={onRetry}
+        testId="target-resolution-error-banner"
+        buttonTestId="retry-target-resolution-btn"
+        buttonClassName={styles.touchTarget}
+      />
+    )
+  }
+  if (status === 'unavailable') {
+    return (
+      <StatusBanner
+        className={styles.statusBanner}
+        textClassName={styles.statusBannerText}
+        icon={<WarningRegular fontSize={18} />}
+        text="The target used by this attack is not currently registered. This conversation is read-only."
+        buttonText="Retry"
+        buttonIcon={<ArrowSyncRegular />}
+        onButtonClick={onRetry}
+        testId="target-resolution-unavailable-banner"
+        buttonTestId="retry-target-resolution-btn"
+        buttonClassName={styles.touchTarget}
+      />
+    )
+  }
+  if (status === 'ambiguous') {
+    return (
+      <StatusBanner
+        className={styles.statusBanner}
+        textClassName={styles.statusBannerText}
+        icon={<WarningRegular fontSize={18} />}
+        text="Multiple registered targets have this attack's identity. Remove duplicate registrations, then retry."
+        buttonText="Retry"
+        buttonIcon={<ArrowSyncRegular />}
+        onButtonClick={onRetry}
+        testId="target-resolution-ambiguous-banner"
+        buttonTestId="retry-target-resolution-btn"
+        buttonClassName={styles.touchTarget}
+      />
+    )
+  }
+  if (status === 'legacy') {
+    const canUseAsTemplate = Boolean(activeTarget)
+    return (
+      <StatusBanner
+        className={styles.statusBanner}
+        textClassName={styles.statusBannerText}
+        icon={<WarningRegular fontSize={18} />}
+        text="This attack does not contain a complete target identity. The original conversation is read-only."
+        buttonText={canUseAsTemplate ? 'Continue with your target' : 'Configure Target'}
+        buttonIcon={canUseAsTemplate ? <CopyRegular /> : <SettingsRegular />}
+        onButtonClick={canUseAsTemplate ? onUseAsTemplate : onConfigureTarget}
+        testId="target-resolution-legacy-banner"
+        buttonTestId={canUseAsTemplate ? 'use-as-template-btn' : 'configure-target-input-btn'}
+        buttonClassName={styles.touchTarget}
+      />
+    )
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // Attachment list
 // ---------------------------------------------------------------------------
 
 interface AttachmentListProps {
   attachments: MessageAttachment[]
-  mediaConversions: Array<{ pieceType: string; convertedValue: string }>
+  mediaConversions: Array<{ pieceType: string; convertedValue: string; convertedDataType: string }>
   onRemove: (index: number) => void
   onClearMediaConversion: (pieceType: string) => void
   formatFileSize: (bytes: number) => string
@@ -76,7 +185,7 @@ function AttachmentList({ attachments, mediaConversions, onRemove, onClearMediaC
                   {att.type === 'audio' && '🎵'}
                   {att.type === 'video' && '🎥'}
                   {att.type === 'file' && '📄'}
-                  {' '}{att.name} ({formatFileSize(att.size)})
+                  {' '}{att.name}{att.size != null ? ` (${formatFileSize(att.size)})` : ''}
                 </Caption1>
               </span>
               <Button
@@ -118,25 +227,29 @@ function AttachmentList({ attachments, mediaConversions, onRemove, onClearMediaC
 interface TextInputRowsProps {
   input: string
   convertedValue?: string | null
+  convertedFileChip?: ConvertedFileChip | null
   disabled: boolean
   textareaRef: Ref<HTMLTextAreaElement>
+  convertedRef: Ref<HTMLTextAreaElement>
   onInput: (e: React.ChangeEvent<HTMLTextAreaElement>) => void
   onKeyDown: (e: KeyboardEvent<HTMLTextAreaElement>) => void
   onConvertedValueChange: (value: string) => void
-  onClearConversion: () => void
+  onClearConvertedFileChip?: () => void
   styles: ReturnType<typeof useChatInputAreaStyles>
+  textInputClassName: string
 }
 
-function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, onKeyDown, onConvertedValueChange, onClearConversion, styles }: TextInputRowsProps) {
+function TextInputRows({ input, convertedValue, convertedFileChip, disabled, textareaRef, convertedRef, onInput, onKeyDown, onConvertedValueChange, onClearConvertedFileChip, styles, textInputClassName }: TextInputRowsProps) {
+  const hasConversion = Boolean(convertedValue) || Boolean(convertedFileChip)
   return (
     <>
       <div className={styles.textRow}>
-        {convertedValue && (
+        {hasConversion && (
           <span className={styles.originalBadge} data-testid="original-banner">Original</span>
         )}
         <textarea
           ref={textareaRef}
-          className={styles.textInput}
+          className={textInputClassName}
           placeholder="Type prompt here"
           value={input}
           onChange={onInput}
@@ -150,25 +263,137 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
         <div className={styles.convertedRow} data-testid="converted-indicator">
           <span className={styles.convertedBadge}>Converted</span>
           <textarea
+            ref={convertedRef}
             className={styles.convertedTextarea}
             value={convertedValue}
             onChange={(e) => onConvertedValueChange(e.target.value)}
             rows={1}
             data-testid="converted-value-input"
           />
-          <Button
-            appearance="transparent"
-            size="small"
-            className={styles.dismissBtn}
-            icon={<DismissRegular />}
-            onClick={onClearConversion}
-            data-testid="clear-conversion-btn"
-          />
+        </div>
+      )}
+      {!convertedValue && convertedFileChip && (
+        <div className={styles.convertedFileBlock} data-testid="converted-file-chip">
+          <div className={styles.convertedRow}>
+            <span className={styles.convertedBadge}>Converted</span>
+            <span aria-hidden="true">
+              {convertedFileChip.iconKind === 'image' && '🖼️'}
+              {convertedFileChip.iconKind === 'audio' && '🎵'}
+              {convertedFileChip.iconKind === 'video' && '🎥'}
+              {convertedFileChip.iconKind === 'file' && '📄'}
+            </span>
+            <Caption1 className={styles.convertedFilename} title={convertedFileChip.name}>
+              {convertedFileChip.name}
+            </Caption1>
+            <Tooltip content="Open in new tab" relationship="label">
+              <a
+                href={convertedFileChip.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={styles.openLink}
+                data-testid="converted-file-open"
+              >
+                <OpenRegular fontSize={14} />
+                <span>Open</span>
+              </a>
+            </Tooltip>
+            <Button
+              appearance="transparent"
+              size="small"
+              className={styles.dismissBtn}
+              icon={<DismissRegular />}
+              onClick={onClearConvertedFileChip}
+              data-testid="clear-converted-file-chip"
+            />
+          </div>
+          {convertedFileChip.iconKind === 'image' && (
+            <img
+              src={convertedFileChip.url}
+              alt={convertedFileChip.name}
+              className={styles.convertedImagePreview}
+              data-testid="converted-file-preview-image"
+            />
+          )}
+          {convertedFileChip.iconKind === 'audio' && (
+            <audio
+              controls
+              src={convertedFileChip.url}
+              className={styles.convertedAudioPreview}
+              data-testid="converted-file-preview-audio"
+            />
+          )}
+          {convertedFileChip.iconKind === 'video' && (
+            <video
+              controls
+              src={convertedFileChip.url}
+              className={styles.convertedVideoPreview}
+              data-testid="converted-file-preview-video"
+            />
+          )}
         </div>
       )}
     </>
   )
 }
+
+// ---------------------------------------------------------------------------
+// Target modality validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the attachment UI types (e.g. `'image'`, `'audio'`, `'file'`) whose
+ * underlying `PromptDataType` the active target does not accept.
+ *
+ * Returns an empty list if no target is selected, if the target advertises no
+ * capabilities, or if every attachment is supported. Deduplicated by UI type.
+ */
+function getUnsupportedAttachmentTypes(
+  attachments: MessageAttachment[],
+  activeTarget: TargetInstance | null | undefined,
+): string[] {
+  if (!activeTarget?.capabilities?.supported_input_modalities) return []
+  const supported = new Set(activeTarget.capabilities.supported_input_modalities)
+  const unsupported: string[] = []
+  const seen = new Set<string>()
+  for (const att of attachments) {
+    const dataType = PIECE_TYPE_TO_DATA_TYPE[att.type]
+    if (dataType && !seen.has(att.type) && !supported.has(dataType)) {
+      seen.add(att.type)
+      unsupported.push(att.type)
+    }
+  }
+  return unsupported
+}
+
+/**
+ * Returns the converter output `PromptDataType` strings (e.g. `'image_path'`)
+ * the active target does not accept. Surfaced separately from attachment
+ * checks because converters can produce data types that don't match any
+ * existing attachment (e.g. a text-to-image converter on text input).
+ *
+ * Returns an empty list if no target is selected, if the target advertises no
+ * capabilities, or if every converter output is supported.
+ */
+function getUnsupportedConverterOutputTypes(
+  converterOutputDataTypes: string[],
+  activeTarget: TargetInstance | null | undefined,
+): string[] {
+  if (!activeTarget?.capabilities?.supported_input_modalities) return []
+  const supported = new Set(activeTarget.capabilities.supported_input_modalities)
+  const unsupported: string[] = []
+  const seen = new Set<string>()
+  for (const dataType of converterOutputDataTypes) {
+    if (!seen.has(dataType) && !supported.has(dataType)) {
+      seen.add(dataType)
+      unsupported.push(dataType)
+    }
+  }
+  return unsupported
+}
+
+// Strip the `_path` suffix used internally for media `PromptDataType` strings
+// so the UI shows e.g. "image" instead of "image_path", matching ConverterPanel badges.
+const formatModalityLabel = (modality: string): string => modality.replace('_path', '')
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -187,6 +412,8 @@ interface ChatInputAreaProps {
   onNewConversation: () => void
   operatorLocked?: boolean
   crossTargetLocked?: boolean
+  targetResolutionStatus?: AttackTargetResolutionStatus
+  onRetryTargetResolution?: () => void
   onUseAsTemplate: () => void
   attackOperator?: string
   noTargetSelected?: boolean
@@ -199,16 +426,38 @@ interface ChatInputAreaProps {
   originalValue?: string | null
   onClearConversion: () => void
   onConvertedValueChange: (value: string) => void
-  mediaConversions?: Array<{ pieceType: string; convertedValue: string }>
+  converterOutputDataTypes?: string[]
+  mediaConversions?: Array<{ pieceType: string; convertedValue: string; convertedDataType: string }>
   onClearMediaConversion: (pieceType: string) => void
+  /** Chip describing a text→file conversion (e.g. PDFConverter output). */
+  convertedFileChip?: ConvertedFileChip | null
+  onClearConvertedFileChip?: () => void
+  /** Whether to show the system-prompt setup (only for a brand-new conversation). */
+  showSystemPrompt?: boolean
+  /** Whether the active target supports system prompts (gates the setup's enabled state). */
+  supportsSystemPrompt?: boolean
+  systemPrompt?: string
+  onSystemPromptChange?: (value: string) => void
 }
 
-const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(function ChatInputArea({ onSend, disabled = false, activeTarget, singleTurnLimitReached = false, onNewConversation, operatorLocked = false, crossTargetLocked = false, onUseAsTemplate, attackOperator, noTargetSelected = false, onConfigureTarget, onToggleConverterPanel, isConverterPanelOpen = false, onInputChange, onAttachmentsChange, convertedValue, originalValue: _originalValue, onClearConversion, onConvertedValueChange, mediaConversions = [], onClearMediaConversion }, ref) {
+const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(function ChatInputArea({ onSend, disabled = false, activeTarget, singleTurnLimitReached = false, onNewConversation, operatorLocked = false, crossTargetLocked = false, targetResolutionStatus = 'idle', onRetryTargetResolution, onUseAsTemplate, attackOperator, noTargetSelected = false, onConfigureTarget, onToggleConverterPanel, isConverterPanelOpen = false, onInputChange, onAttachmentsChange, convertedValue, originalValue: _originalValue, onClearConversion, onConvertedValueChange, converterOutputDataTypes = [], mediaConversions = [], onClearMediaConversion, convertedFileChip, onClearConvertedFileChip, showSystemPrompt = false, supportsSystemPrompt = false, systemPrompt = '', onSystemPromptChange }, ref) {
   const styles = useChatInputAreaStyles()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<MessageAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const convertedRef = useRef<HTMLTextAreaElement>(null)
+
+  // Derive unsupported types from attachments AND converter outputs
+  const unsupportedAttachmentTypes = getUnsupportedAttachmentTypes(attachments, activeTarget)
+  const unsupportedConverterOutputTypes = getUnsupportedConverterOutputTypes(converterOutputDataTypes, activeTarget)
+  const hasUnsupportedModalities =
+    unsupportedAttachmentTypes.length > 0 || unsupportedConverterOutputTypes.length > 0
+
+  const hasConversion = convertedValue != null && convertedValue !== ''
+  const textInputClassName = hasConversion
+    ? mergeClasses(styles.textInput, styles.textInputShared)
+    : styles.textInput
 
   useImperativeHandle(ref, () => ({
     addAttachment: (att: MessageAttachment) => {
@@ -258,7 +507,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   }
 
   const handleSend = () => {
-    if ((input || attachments.length > 0) && !disabled) {
+    if ((input || attachments.length > 0) && !disabled && !hasUnsupportedModalities) {
       onSend(input, convertedValue ?? undefined, attachments)
       setInput('')
       setAttachments([])
@@ -283,15 +532,23 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
     }
   }
 
-  // Auto-resize textarea whenever input changes (covers paste, setText, etc.)
+  // Auto-resize textareas whenever content changes.
   // useLayoutEffect fires before paint, avoiding visible flicker on resize.
+  // CSS max-height (60vh solo / 30vh shared) caps the growth; overflowY: auto scrolls beyond.
   useLayoutEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 96) + 'px'
+      textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px'
     }
     onInputChange(input)
   }, [input, onInputChange])
+
+  useLayoutEffect(() => {
+    if (convertedRef.current) {
+      convertedRef.current.style.height = 'auto'
+      convertedRef.current.style.height = convertedRef.current.scrollHeight + 'px'
+    }
+  }, [convertedValue])
 
   useEffect(() => {
     const types = [...new Set(attachments.map((a) => a.type))]
@@ -338,7 +595,16 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   return (
     <div className={styles.root}>
       <div className={styles.inputContainer}>
-        {noTargetSelected ? (
+        {isTargetResolutionBlocking(targetResolutionStatus) ? (
+          <TargetResolutionBanner
+            status={targetResolutionStatus}
+            activeTarget={activeTarget}
+            onRetry={onRetryTargetResolution}
+            onConfigureTarget={onConfigureTarget}
+            onUseAsTemplate={onUseAsTemplate}
+            styles={styles}
+          />
+        ) : noTargetSelected ? (
           <StatusBanner
             className={styles.noTargetBanner}
             textClassName={styles.noTargetText}
@@ -349,6 +615,8 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
             onButtonClick={onConfigureTarget}
             testId="no-target-banner"
             buttonTestId="configure-target-input-btn"
+            buttonClassName={styles.touchTarget}
+            tourTarget="chat-prerequisite"
           />
         ) : operatorLocked ? (
           <StatusBanner
@@ -361,6 +629,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
             onButtonClick={onUseAsTemplate}
             testId="operator-locked-banner"
             buttonTestId="use-as-template-btn"
+            buttonClassName={styles.touchTarget}
           />
         ) : crossTargetLocked ? (
           <StatusBanner
@@ -373,6 +642,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
             onButtonClick={onUseAsTemplate}
             testId="cross-target-banner"
             buttonTestId="use-as-template-btn"
+            buttonClassName={styles.touchTarget}
           />
         ) : singleTurnLimitReached ? (
           <StatusBanner
@@ -385,10 +655,18 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
             onButtonClick={onNewConversation}
             testId="single-turn-banner"
             buttonTestId="new-conversation-btn"
+            buttonClassName={styles.touchTarget}
           />
         ) : (
         <>
         <div className={styles.inputWrapper}>
+          {showSystemPrompt && onSystemPromptChange && (
+            <SystemPromptSetup
+              value={systemPrompt}
+              onChange={onSystemPromptChange}
+              disabled={!!activeTarget && !supportsSystemPrompt}
+            />
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -399,23 +677,28 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
           />
           <div className={styles.inputColumns}>
             <div className={styles.columnLeft}>
-              <Button
-                className={styles.iconButton}
-                appearance="subtle"
-                icon={<AttachRegular />}
-                onClick={() => fileInputRef.current?.click()}
-                disabled={disabled}
-                title="Attach files"
-              />
-              <Button
-                className={styles.iconButton}
-                appearance={isConverterPanelOpen ? 'primary' : 'subtle'}
-                icon={<ArrowShuffleRegular />}
-                onClick={onToggleConverterPanel}
-                disabled={disabled}
-                data-testid="toggle-converter-panel-btn"
-                title="Toggle converter panel"
-              />
+              <Tooltip content="Attach files" relationship="label">
+                <Button
+                  className={styles.iconButton}
+                  appearance="subtle"
+                  icon={<AttachRegular />}
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={disabled}
+                  aria-label="Attach files"
+                />
+              </Tooltip>
+              <Tooltip content="Toggle converter panel" relationship="label">
+                <Button
+                  className={styles.iconButton}
+                  appearance={isConverterPanelOpen ? 'primary' : 'subtle'}
+                  icon={<ArrowShuffleRegular />}
+                  onClick={onToggleConverterPanel}
+                  disabled={disabled}
+                  data-testid="toggle-converter-panel-btn"
+                  data-tour="converter-toggle"
+                  aria-label="Toggle converter panel"
+                />
+              </Tooltip>
             </div>
             <div className={styles.columnCenter}>
               <AttachmentList
@@ -426,20 +709,44 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 formatFileSize={formatFileSize}
                 styles={styles}
               />
+              {hasUnsupportedModalities && (
+                <div className={styles.unsupportedWarning} data-testid="unsupported-modality-warning">
+                  <WarningRegular fontSize={14} />
+                  <Caption1>
+                    {unsupportedAttachmentTypes.length > 0 && (
+                      <>
+                        This target does not support {unsupportedAttachmentTypes.join(', ')} attachments.
+                        Remove them to send.
+                      </>
+                    )}
+                    {unsupportedAttachmentTypes.length > 0 && unsupportedConverterOutputTypes.length > 0 && ' '}
+                    {unsupportedConverterOutputTypes.length > 0 && (
+                      <>
+                        The selected converter produces{' '}
+                        {unsupportedConverterOutputTypes.map(formatModalityLabel).join(', ')} output, which this target
+                        does not support.
+                      </>
+                    )}
+                  </Caption1>
+                </div>
+              )}
               <TextInputRows
                 input={input}
                 convertedValue={convertedValue}
+                convertedFileChip={convertedFileChip}
                 disabled={disabled}
                 textareaRef={textareaRef}
+                convertedRef={convertedRef}
                 onInput={handleInput}
                 onKeyDown={handleKeyDown}
                 onConvertedValueChange={onConvertedValueChange}
-                onClearConversion={onClearConversion}
+                onClearConvertedFileChip={onClearConvertedFileChip}
                 styles={styles}
+                textInputClassName={textInputClassName}
               />
             </div>
             <div className={styles.columnRight}>
-              {activeTarget && activeTarget.supports_multi_turn === false && (
+              {activeTarget && activeTarget.capabilities?.supports_multi_turn === false && (
                 <Tooltip
                   content="This target does not track conversation history — each turn is sent independently."
                   relationship="description"
@@ -449,15 +756,28 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                   </span>
                 </Tooltip>
               )}
-              <Button
-                className={styles.sendButton}
-                appearance="primary"
-                icon={<SendRegular />}
-                onClick={handleSend}
-                disabled={disabled || (!input && attachments.length === 0)}
-                title="Send message"
-                data-testid="send-message-btn"
-              />
+              <Tooltip content="Send message" relationship="label">
+                <Button
+                  className={styles.sendButton}
+                  appearance="primary"
+                  icon={<SendRegular />}
+                  onClick={handleSend}
+                  disabled={disabled || (!input && attachments.length === 0) || hasUnsupportedModalities}
+                  aria-label="Send message"
+                  data-testid="send-message-btn"
+                />
+              </Tooltip>
+              {convertedValue && (
+                <Tooltip content="Clear conversion" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    className={styles.clearConversionButton}
+                    icon={<DismissRegular />}
+                    onClick={onClearConversion}
+                    data-testid="clear-conversion-btn"
+                  />
+                </Tooltip>
+              )}
             </div>
           </div>
         </div>

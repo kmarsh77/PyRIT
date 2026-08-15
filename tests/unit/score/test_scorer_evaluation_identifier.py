@@ -9,21 +9,26 @@ Covers ``ScorerEvaluationIdentifier`` ClassVar values and eval-hash delegation.
 
 import pytest
 
-from pyrit.identifiers import ComponentIdentifier, Identifiable, compute_eval_hash
-from pyrit.identifiers.evaluation_identifier import ScorerEvaluationIdentifier
+from pyrit.models import ComponentIdentifier, Identifiable, ScorerEvaluationIdentifier, compute_eval_hash
 
 
 class TestScorerEvaluationIdentifierConstants:
     """Tests for the ClassVar constants on ScorerEvaluationIdentifier."""
 
     def test_child_eval_rules_keys(self):
-        """Test that CHILD_EVAL_RULES contains the expected scorer target names."""
-        assert set(ScorerEvaluationIdentifier.CHILD_EVAL_RULES.keys()) == {"prompt_target"}
+        """Test that CHILD_EVAL_RULES contains the expected scorer target names.
+
+        ``prompt_target`` carries the scorer's inner target projection. ``targets``
+        is the global wrapper-passthrough rule derived from
+        ``TargetIdentifier.targets`` (it only fires on nested multi-targets).
+        """
+        assert set(ScorerEvaluationIdentifier.CHILD_EVAL_RULES.keys()) == {"prompt_target", "targets"}
 
     def test_prompt_target_rule(self):
-        """Test that prompt_target has the expected included params."""
+        """Test that prompt_target has the expected included params and fallbacks."""
         rule = ScorerEvaluationIdentifier.CHILD_EVAL_RULES["prompt_target"]
-        assert rule.included_params == frozenset({"model_name", "temperature", "top_p"})
+        assert rule.included_params == frozenset({"underlying_model_name", "temperature", "top_p"})
+        assert rule.param_fallbacks == {"underlying_model_name": "model_name"}
 
 
 class TestScorerEvaluationIdentifierEvalHash:
@@ -41,12 +46,12 @@ class TestScorerEvaluationIdentifierEvalHash:
         child1 = ComponentIdentifier(
             class_name="Target",
             class_module="pyrit.target",
-            params={"model_name": "gpt-4", "endpoint": "https://endpoint-a.com"},
+            params={"underlying_model_name": "gpt-4", "endpoint": "https://endpoint-a.com"},
         )
         child2 = ComponentIdentifier(
             class_name="Target",
             class_module="pyrit.target",
-            params={"model_name": "gpt-4", "endpoint": "https://endpoint-b.com"},
+            params={"underlying_model_name": "gpt-4", "endpoint": "https://endpoint-b.com"},
         )
         id1 = ComponentIdentifier(class_name="Scorer", class_module="pyrit.score", children={"prompt_target": child1})
         id2 = ComponentIdentifier(class_name="Scorer", class_module="pyrit.score", children={"prompt_target": child2})
@@ -58,12 +63,12 @@ class TestScorerEvaluationIdentifierEvalHash:
         child1 = ComponentIdentifier(
             class_name="Target",
             class_module="pyrit.target",
-            params={"model_name": "gpt-4", "temperature": 0.7},
+            params={"underlying_model_name": "gpt-4", "temperature": 0.7},
         )
         child2 = ComponentIdentifier(
             class_name="Target",
             class_module="pyrit.target",
-            params={"model_name": "gpt-4", "temperature": 0.0},
+            params={"underlying_model_name": "gpt-4", "temperature": 0.0},
         )
         id1 = ComponentIdentifier(class_name="Scorer", class_module="pyrit.score", children={"prompt_target": child1})
         id2 = ComponentIdentifier(class_name="Scorer", class_module="pyrit.score", children={"prompt_target": child2})
@@ -94,7 +99,7 @@ class TestScorerGetEvalHash:
                 child = ComponentIdentifier(
                     class_name="Target",
                     class_module="pyrit.target",
-                    params={"model_name": "gpt-4", "endpoint": "https://example.com"},
+                    params={"underlying_model_name": "gpt-4", "endpoint": "https://example.com"},
                 )
                 return ComponentIdentifier.of(self, children={"prompt_target": child})
 
@@ -119,7 +124,7 @@ class TestScorerGetEvalHash:
                 child = ComponentIdentifier(
                     class_name="Target",
                     class_module="pyrit.target",
-                    params={"model_name": "gpt-4", "endpoint": self._endpoint},
+                    params={"underlying_model_name": "gpt-4", "endpoint": self._endpoint},
                 )
                 return ComponentIdentifier.of(self, children={"prompt_target": child})
 
@@ -147,3 +152,111 @@ class TestScorerGetEvalHash:
 
         # No children named "prompt_target" or "converter_target", so no filtering occurs
         assert eval_hash == identifier.hash
+
+
+class TestScorerEvalHashFallback:
+    """Tests for underlying_model_name → model_name fallback behavior."""
+
+    def test_underlying_model_name_used_when_present(self):
+        """Test that underlying_model_name is used for eval hash when set."""
+        child = ComponentIdentifier(
+            class_name="Target",
+            class_module="pyrit.target",
+            params={"underlying_model_name": "gpt-4o", "model_name": "my-deployment", "temperature": 0.7},
+        )
+        cid = ComponentIdentifier(
+            class_name="Scorer",
+            class_module="pyrit.score",
+            children={"prompt_target": child},
+        )
+        identity = ScorerEvaluationIdentifier(cid)
+
+        # Different deployment name, same underlying model → same eval hash
+        child2 = ComponentIdentifier(
+            class_name="Target",
+            class_module="pyrit.target",
+            params={"underlying_model_name": "gpt-4o", "model_name": "other-deployment", "temperature": 0.7},
+        )
+        cid2 = ComponentIdentifier(
+            class_name="Scorer",
+            class_module="pyrit.score",
+            children={"prompt_target": child2},
+        )
+        identity2 = ScorerEvaluationIdentifier(cid2)
+        assert identity.eval_hash == identity2.eval_hash
+
+    def test_falls_back_to_model_name_when_underlying_empty(self):
+        """Test that model_name is used as fallback when underlying_model_name is empty."""
+        child_with_underlying = ComponentIdentifier(
+            class_name="Target",
+            class_module="pyrit.target",
+            params={"underlying_model_name": "gpt-4o", "model_name": "my-deployment", "temperature": 0.7},
+        )
+        child_without_underlying = ComponentIdentifier(
+            class_name="Target",
+            class_module="pyrit.target",
+            params={"underlying_model_name": "", "model_name": "gpt-4o", "temperature": 0.7},
+        )
+        cid1 = ComponentIdentifier(
+            class_name="Scorer",
+            class_module="pyrit.score",
+            children={"prompt_target": child_with_underlying},
+        )
+        cid2 = ComponentIdentifier(
+            class_name="Scorer",
+            class_module="pyrit.score",
+            children={"prompt_target": child_without_underlying},
+        )
+
+        # Both should produce the same eval hash since the effective model is "gpt-4o"
+        assert ScorerEvaluationIdentifier(cid1).eval_hash == ScorerEvaluationIdentifier(cid2).eval_hash
+
+    def test_falls_back_to_model_name_when_underlying_missing(self):
+        """Test that model_name is used as fallback when underlying_model_name is absent."""
+        child_with_underlying = ComponentIdentifier(
+            class_name="Target",
+            class_module="pyrit.target",
+            params={"underlying_model_name": "gpt-4o", "temperature": 0.7},
+        )
+        child_with_model_name_only = ComponentIdentifier(
+            class_name="Target",
+            class_module="pyrit.target",
+            params={"model_name": "gpt-4o", "temperature": 0.7},
+        )
+        cid1 = ComponentIdentifier(
+            class_name="Scorer",
+            class_module="pyrit.score",
+            children={"prompt_target": child_with_underlying},
+        )
+        cid2 = ComponentIdentifier(
+            class_name="Scorer",
+            class_module="pyrit.score",
+            children={"prompt_target": child_with_model_name_only},
+        )
+
+        assert ScorerEvaluationIdentifier(cid1).eval_hash == ScorerEvaluationIdentifier(cid2).eval_hash
+
+    def test_different_underlying_models_produce_different_hash(self):
+        """Test that different underlying model names produce different eval hashes."""
+        child1 = ComponentIdentifier(
+            class_name="Target",
+            class_module="pyrit.target",
+            params={"underlying_model_name": "gpt-4o", "temperature": 0.7},
+        )
+        child2 = ComponentIdentifier(
+            class_name="Target",
+            class_module="pyrit.target",
+            params={"underlying_model_name": "gpt-4o-mini", "temperature": 0.7},
+        )
+        cid1 = ComponentIdentifier(
+            class_name="Scorer",
+            class_module="pyrit.score",
+            children={"prompt_target": child1},
+        )
+        cid2 = ComponentIdentifier(
+            class_name="Scorer",
+            class_module="pyrit.score",
+            children={"prompt_target": child2},
+        )
+
+        assert ScorerEvaluationIdentifier(cid1).eval_hash != ScorerEvaluationIdentifier(cid2).eval_hash

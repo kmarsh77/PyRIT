@@ -6,11 +6,12 @@ import path from 'path'
 // Without this, Vite logs dozens of "http proxy error" stack traces.
 const logger = createLogger()
 const originalError = logger.error
+const backendUrl = process.env.PYRIT_BACKEND_URL ?? 'http://127.0.0.1:8000'
 let proxyWarned = false
 logger.error = (msg, options) => {
   if (typeof msg === 'string' && msg.includes('http proxy error')) {
     if (!proxyWarned) {
-      console.log('[vite] Waiting for backend on port 8000...')
+      console.log(`[vite] Waiting for backend at ${backendUrl}...`)
       proxyWarned = true
     }
     return
@@ -40,7 +41,7 @@ export default defineConfig({
     proxy: {
       '/api': {
         // Use 127.0.0.1 to avoid Node.js 17+ resolving localhost to IPv6 ::1
-        target: 'http://127.0.0.1:8000',
+        target: backendUrl,
         changeOrigin: true,
         // Return 502 on proxy errors so in-flight requests fail fast
         // instead of hanging until the backend comes up.
@@ -93,10 +94,9 @@ export default defineConfig({
       '@fluentui/react-icons',
       'axios',
     ],
-    // Use esbuild for fast transforms
-    esbuildOptions: {
+    // Vite 8 uses Rolldown for dependency pre-bundling
+    rolldownOptions: {
       target: 'esnext',
-      keepNames: false,
     },
     exclude: [],
   },
@@ -108,9 +108,20 @@ export default defineConfig({
     // Optimize chunk splitting
     rollupOptions: {
       output: {
-        manualChunks: {
-          'react-vendor': ['react', 'react-dom'],
-          'fluent-vendor': ['@fluentui/react-components', '@fluentui/react-icons'],
+        // Vite 8 / Rolldown requires manualChunks to be a function, not an object
+        manualChunks: (id) => {
+          if (id.includes('node_modules')) {
+            if (id.includes('@fluentui/')) {
+              return 'fluent-vendor'
+            }
+            if (
+              id.includes('/react/') ||
+              id.includes('/react-dom/') ||
+              id.includes('/scheduler/')
+            ) {
+              return 'react-vendor'
+            }
+          }
         },
       },
     },

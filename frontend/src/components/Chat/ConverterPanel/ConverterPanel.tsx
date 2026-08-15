@@ -18,6 +18,10 @@ const PIECE_TYPE_LABELS: Record<string, string> = {
   video: 'Video',
 }
 
+// Converter classes the backend can build but that aren't useful to offer in the
+// picker (base/helper classes).
+const HIDDEN_CONVERTER_TYPES = new Set<string>(['SelectiveTextConverter'])
+
 interface ConverterPanelProps {
   onClose: () => void
   previewText?: string
@@ -35,6 +39,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
   const [paramValues, setParamValues] = useState<Record<string, string>>({})
   const [paramsExpanded, setParamsExpanded] = useState(true)
   const [previewOutput, setPreviewOutput] = useState('')
+  const [previewOutputType, setPreviewOutputType] = useState('text')
   const [previewConverterInstanceId, setPreviewConverterInstanceId] = useState<string | null>(null)
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
@@ -44,26 +49,28 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
   const [panelWidth, setPanelWidth] = useState(320)
   const isDragging = useRef(false)
 
-  const loadConverters = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-
-    try {
-      const response = await convertersApi.listConverterCatalog()
-      setConverters(response.items)
-    } catch (err) {
-      setConverters([])
-      setSelectedConverterType('')
-      setQuery('')
-      setError(toApiError(err).detail)
-    } finally {
-      setIsLoading(false)
+  useEffect(() => {
+    let cancelled = false
+    convertersApi.listConverterCatalog()
+      .then((response) => {
+        if (cancelled) return
+        setConverters(response.items.filter((c) => !HIDDEN_CONVERTER_TYPES.has(c.converter_type)))
+        setError(null)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setConverters([])
+        setSelectedConverterType('')
+        setQuery('')
+        setError(toApiError(err).detail)
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false)
+      })
+    return () => {
+      cancelled = true
     }
   }, [])
-
-  useEffect(() => {
-    void loadConverters()
-  }, [loadConverters])
 
   // Tabs: always show Text, plus one for each attachment type
   const tabs = useMemo(() => {
@@ -78,15 +85,14 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
     return result
   }, [activeInputTypes])
 
-  // Reset to text tab when tabs change and active tab is no longer available
-  useEffect(() => {
-    if (!tabs.includes(activeTab)) {
-      setActiveTab('text')
-    }
-  }, [tabs, activeTab])
+  // If the selected tab disappears (e.g. user removes an attachment), fall back
+  // to 'text' for any derivation that depends on the active tab. The actual
+  // `activeTab` state is only updated on user click; deriving the effective
+  // value avoids a setState-in-effect that react-hooks/set-state-in-effect would flag.
+  const effectiveActiveTab = tabs.includes(activeTab) ? activeTab : 'text'
 
   // Filter converters by the active tab's input type
-  const activeDataType = PIECE_TYPE_TO_DATA_TYPE[activeTab] ?? 'text'
+  const activeDataType = PIECE_TYPE_TO_DATA_TYPE[effectiveActiveTab] ?? 'text'
 
   const filteredConverters = useMemo(() => {
     let filtered = converters.filter((c) => {
@@ -107,7 +113,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
     const groups: Record<string, typeof filteredConverters> = {}
     const order = ['text', 'image_path', 'audio_path', 'video_path', 'binary_path']
     for (const c of filteredConverters) {
-      const outType = (c.supported_output_types ?? [])[0] ?? 'text'
+      const outType = c.supported_output_types[0]
       if (!groups[outType]) groups[outType] = []
       groups[outType].push(c)
     }
@@ -147,6 +153,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
     setQuery('')
     setParamValues({})
     setPreviewOutput('')
+    setPreviewOutputType('text')
     setPreviewConverterInstanceId(null)
     setPreviewError(null)
     setShowValidation(false)
@@ -159,12 +166,13 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
     const newConverter = converters.find((c) => c.converter_type === type)
     const defaults: Record<string, string> = {}
     for (const p of newConverter?.parameters ?? []) {
-      if (p.default_value != null) {
-        defaults[p.name] = p.default_value
+      if (p.default != null) {
+        defaults[p.name] = p.default
       }
     }
     setParamValues(defaults)
     setPreviewOutput('')
+    setPreviewOutputType('text')
     setPreviewConverterInstanceId(null)
     setPreviewError(null)
     setShowValidation(false)
@@ -191,7 +199,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
   }, [])
 
   const handlePreview = useCallback(async () => {
-    const previewValue = activeTab === 'text' ? previewText : (attachmentData[activeTab] ?? '')
+    const previewValue = effectiveActiveTab === 'text' ? previewText : (attachmentData[effectiveActiveTab] ?? '')
     if (!selectedConverterType || !previewValue.trim()) {
       return
     }
@@ -214,35 +222,56 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
       })
 
       setPreviewOutput(previewResponse.converted_value)
+      setPreviewOutputType(previewResponse.converted_value_data_type ?? 'text')
       setPreviewConverterInstanceId(converterId)
     } catch (err) {
       setPreviewError(toApiError(err).detail)
     } finally {
       setIsPreviewing(false)
     }
-  }, [activeTab, previewText, attachmentData, selectedConverterType, missingRequiredParams, paramValues, activeDataType, getOrCreateConverterInstance])
+  }, [effectiveActiveTab, previewText, attachmentData, selectedConverterType, missingRequiredParams, paramValues, activeDataType, getOrCreateConverterInstance])
 
-  // Auto-preview for non-LLM text-output converters (they're fast/cheap)
+  // Auto-preview is only safe for converters that:
+  //   - aren't LLM-based (network cost)
+  //   - emit text output (file outputs would litter the disk on every keystroke)
+  // Everything else requires an explicit Preview click.
+  const supportsAutoPreview = useMemo(() => {
+    if (!selectedConverter) return false
+    if (selectedConverter.is_llm_based) return false
+    const outputs = selectedConverter.supported_output_types ?? []
+    if (outputs.length === 0) return true
+    return outputs.every((t) => t === 'text')
+  }, [selectedConverter])
+
   const autoPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Clear preview when input is emptied (e.g. after sending). Uses the "adjust
+  // state during render" pattern with a prev-value comparison so the reset
+  // fires exactly once per input transition, even if the input has been empty
+  // before (e.g. user types, clears, types, clears again). Avoids
+  // react-hooks/set-state-in-effect.
+  const currentInput = effectiveActiveTab === 'text' ? previewText : (attachmentData[effectiveActiveTab] ?? '')
+  const [prevInput, setPrevInput] = useState(currentInput)
+  if (currentInput !== prevInput) {
+    setPrevInput(currentInput)
+    if (!currentInput.trim()) {
+      setPreviewOutput('')
+      setPreviewOutputType('text')
+      setPreviewConverterInstanceId(null)
+      setPreviewError(null)
+    }
+  }
+
   useEffect(() => {
     if (autoPreviewTimer.current) {
       clearTimeout(autoPreviewTimer.current)
       autoPreviewTimer.current = null
     }
 
-    const currentPreviewValue = activeTab === 'text' ? previewText : (attachmentData[activeTab] ?? '')
-
-    // Clear preview when input is emptied (e.g. after sending)
-    if (!currentPreviewValue.trim()) {
-      setPreviewOutput('')
-      setPreviewConverterInstanceId(null)
-      setPreviewError(null)
-    }
-
     if (
       !selectedConverter ||
-      selectedConverter.is_llm_based ||
-      !currentPreviewValue.trim() ||
+      !supportsAutoPreview ||
+      !currentInput.trim() ||
       missingRequiredParams.length
     ) {
       return
@@ -257,7 +286,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
         clearTimeout(autoPreviewTimer.current)
       }
     }
-    }, [activeTab, previewText, attachmentData, missingRequiredParams, selectedConverter, handlePreview])
+    }, [currentInput, missingRequiredParams, selectedConverter, supportsAutoPreview, handlePreview])
   const handleMouseDown = useCallback(() => {
     isDragging.current = true
     document.body.style.cursor = 'col-resize'
@@ -291,7 +320,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
         <div className={styles.headerTitle}>
           <Text weight="semibold" size={300}>Converters</Text>
           <Text size={200} className={styles.hintText}>
-            Select and preview prompt converters here in the next step.
+            Select and preview converters here in the next step.
           </Text>
         </div>
         <Button
@@ -299,12 +328,13 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
           size="small"
           icon={<DismissRegular />}
           onClick={onClose}
+          className={styles.touchTarget}
           data-testid="close-converter-panel-btn"
         />
       </div>
       {tabs.length > 1 && (
         <TabList
-          selectedValue={activeTab}
+          selectedValue={effectiveActiveTab}
           onTabSelect={handleTabSelect}
           size="small"
           className={styles.tabBar}
@@ -363,7 +393,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
                 )}
                 <div className={styles.metaRow}>
                   <Text size={200} className={styles.badgeText}>In:</Text>
-                  {(selectedConverter.supported_input_types ?? []).map((t) => (
+                  {selectedConverter.supported_input_types.map((t) => (
                     <span key={t} className={`${styles.typeBadge} ${styles[`input_${t}` as keyof typeof styles] ?? ''}`}>
                       {t.replace('_path', '')}
                     </span>
@@ -371,7 +401,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
                 </div>
                 <div className={styles.metaRow}>
                   <Text size={200} className={styles.badgeText}>Out:</Text>
-                  {(selectedConverter.supported_output_types ?? []).map((t) => (
+                  {selectedConverter.supported_output_types.map((t) => (
                     <span key={t} className={`${styles.typeBadge} ${styles[`output_${t}` as keyof typeof styles] ?? ''}`}>
                       {t.replace('_path', '')}
                     </span>
@@ -393,13 +423,14 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
             )}
 
             <ConverterPreview
-              activeTab={activeTab}
+              activeTab={effectiveActiveTab}
               previewText={previewText}
               attachmentData={attachmentData}
               selectedConverterType={selectedConverterType}
               isPreviewing={isPreviewing}
               previewError={previewError}
               previewOutput={previewOutput}
+              previewOutputType={previewOutputType}
               previewConverterInstanceId={previewConverterInstanceId}
               onPreview={handlePreview}
               onUseConvertedValue={onUseConvertedValue}

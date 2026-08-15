@@ -5,11 +5,11 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.17.2
+#       jupytext_version: 1.19.4
 # ---
 
 # %% [markdown]
-# # 4. OpenAI Video Target
+# # OpenAI Video Target
 #
 # `OpenAIVideoTarget` supports three modes:
 # - **Text-to-video**: Generate a video from a text prompt.
@@ -17,19 +17,17 @@
 # - **Text+Image-to-video**: Use an image as the first frame of the generated video.
 #
 # Note that the video scorer requires `opencv`, which is not a default PyRIT dependency. You need to install it manually or using `pip install pyrit[opencv]`.
-
 # %% [markdown]
 # ## Text-to-Video
 #
 # This example shows the simplest mode: generating video from text prompts, with scoring.
-
 # %%
 from pyrit.executor.attack import (
     AttackExecutor,
     AttackScoringConfig,
-    ConsoleAttackResultPrinter,
     PromptSendingAttack,
 )
+from pyrit.output import output_attack_async
 from pyrit.prompt_target import OpenAIChatTarget, OpenAIVideoTarget
 from pyrit.score import (
     AudioTrueFalseScorer,
@@ -56,9 +54,9 @@ objectives = [
     "Video of a raccoon pirate eating a croissant at a cafe in France",
 ]
 
-objective_scorer = SelfAskTrueFalseScorer(
+objective_scorer = SelfAskTrueFalseScorer.from_question(
     chat_target=OpenAIChatTarget(),
-    true_false_question=TrueFalseQuestion(true_description="A raccoon dressed as a pirate is actively eating a pastry"),
+    question=TrueFalseQuestion(true_description="A raccoon dressed as a pirate is actively eating a pastry"),
 )
 
 video_scorer = VideoTrueFalseScorer(
@@ -80,7 +78,7 @@ results = await AttackExecutor().execute_attack_async(  # type: ignore
 )
 
 for result in results:
-    await ConsoleAttackResultPrinter().print_result_async(result=result, include_auxiliary_scores=True)  # type: ignore
+    await output_attack_async(result, include_auxiliary_scores=True)
 
 # %% [markdown]
 # ## Scoring video and audio **together**:
@@ -97,17 +95,15 @@ objectives = [
 ]
 
 # Visual scorer - checks what is SEEN in the video frames
-visual_scorer = SelfAskTrueFalseScorer(
+visual_scorer = SelfAskTrueFalseScorer.from_question(
     chat_target=OpenAIChatTarget(),
-    true_false_question=TrueFalseQuestion(true_description="A raccoon dressed as a pirate is actively eating a pastry"),
+    question=TrueFalseQuestion(true_description="A raccoon dressed as a pirate is actively eating a pastry"),
 )
 
 # Audio transcript scorer - checks what is SAID in the video
-audio_text_scorer = SelfAskTrueFalseScorer(
+audio_text_scorer = SelfAskTrueFalseScorer.from_question(
     chat_target=OpenAIChatTarget(),
-    true_false_question=TrueFalseQuestion(
-        true_description="Someone introduces themselves and expresses enjoyment of a croissant"
-    ),
+    question=TrueFalseQuestion(true_description="Someone introduces themselves and expresses enjoyment of a croissant"),
 )
 
 # BOTH the audio and visual scorers must be true for the overall score to be true (AND aggregation)
@@ -130,7 +126,7 @@ results = await AttackExecutor().execute_attack_async(  # type: ignore
 )
 
 for result in results:
-    await ConsoleAttackResultPrinter().print_result_async(result=result, include_auxiliary_scores=True)  # type: ignore
+    await output_attack_async(result, include_auxiliary_scores=True)
 
 # Capture video_id from the first result for use in the remix section below
 video_id = results[0].last_response.prompt_metadata["video_id"]
@@ -151,7 +147,7 @@ remix_piece = MessagePiece(
     original_value="Make it a watercolor painting style",
     prompt_metadata={"video_id": video_id},
 )
-remix_result = await video_target.send_prompt_async(message=Message([remix_piece]))  # type: ignore
+remix_result = await video_target.send_prompt_async(message=Message(message_pieces=[remix_piece]))  # type: ignore
 print(f"Remixed video: {remix_result[0].message_pieces[0].converted_value}")
 
 # %% [markdown]
@@ -166,9 +162,9 @@ import uuid
 # Create a simple test image matching the video resolution (1280x720)
 from PIL import Image
 
-from pyrit.common.path import HOME_PATH
+from pyrit.common.path import DATASETS_PATH
 
-sample_image = HOME_PATH / "assets" / "pyrit_architecture.png"
+sample_image = DATASETS_PATH / "seed_datasets" / "local" / "examples" / "multimodal_data" / "pyrit_architecture.png"
 resized = Image.open(sample_image).resize((1280, 720)).convert("RGB")
 
 import tempfile
@@ -193,5 +189,5 @@ image_piece = MessagePiece(
     converted_value_data_type="image_path",
     conversation_id=conversation_id,
 )
-result = await i2v_target.send_prompt_async(message=Message([text_piece, image_piece]))  # type: ignore
+result = await i2v_target.send_prompt_async(message=Message(message_pieces=[text_piece, image_piece]))  # type: ignore
 print(f"Text+Image-to-video result: {result[0].message_pieces[0].converted_value}")

@@ -2,20 +2,15 @@
 # Licensed under the MIT license.
 import base64
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
-import httpx
-
+from pyrit.common import forward_init_parameters, get_mime_type
 from pyrit.exceptions import (
     EmptyResponseException,
     pyrit_target_retry,
 )
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import (
-    Message,
-    construct_response_from_request,
-    data_serializer_factory,
-)
+from pyrit.memory import data_serializer_factory
+from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
@@ -47,17 +42,20 @@ class OpenAIImageTarget(OpenAITarget):
         )
     )
 
+    @forward_init_parameters
     def __init__(
         self,
+        *,
         image_size: Literal[
-            "256x256", "512x512", "1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792"
+            "auto",
+            "1024x1024",
+            "1536x1024",
+            "1024x1536",
         ] = "1024x1024",
-        output_format: Optional[Literal["png", "jpeg", "webp"]] = None,
-        quality: Optional[Literal["standard", "hd", "low", "medium", "high"]] = None,
-        style: Optional[Literal["natural", "vivid"]] = None,
-        custom_configuration: Optional[TargetConfiguration] = None,
-        custom_capabilities: Optional[TargetCapabilities] = None,
-        *args: Any,
+        output_format: Literal["png", "jpeg", "webp"] | None = None,
+        quality: Literal["auto", "low", "medium", "high"] | None = None,
+        background: Literal["transparent", "opaque", "auto"] | None = None,
+        custom_configuration: TargetConfiguration | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -76,43 +74,41 @@ class OpenAIImageTarget(OpenAITarget):
                 minute before hitting a rate limit. The number of requests sent to the target
                 will be capped at the value provided.
             image_size (Literal, Optional): The size of the generated image.
-                Accepts "256x256", "512x512", "1024x1024", "1536x1024",
-                "1024x1536", "1792x1024", or "1024x1792".
-                Different models support different image sizes.
-                GPT image models support "1024x1024", "1536x1024" and "1024x1536".
-                DALL-E-3 supports "1024x1024", "1792x1024" and "1024x1792".
-                DALL-E-2 supports "256x256", "512x512" and "1024x1024".
+                GPT image models support "auto", "1024x1024", "1536x1024", and "1024x1536".
                 Defaults to "1024x1024".
             output_format (Literal["png", "jpeg", "webp"], Optional): The output format of the generated images.
-                This parameter is only supported for GPT image models.
-                Default is to not specify (which will use the model's default format, e.g. PNG for OpenAI image models).
-            quality (Literal["standard", "hd", "low", "medium", "high"], Optional): The quality of the generated images.
-                Different models support different quality settings.
-                GPT image models support "high", "medium" and "low".
-                DALL-E-3 supports "hd" and "standard".
-                DALL-E-2 supports "standard" only.
-                Default is to not specify.
-            style (Literal["natural", "vivid"], Optional): The style of the generated images.
-                This parameter is only supported for DALL-E-3.
-                Default is to not specify.
+                Default is to not specify (which will use the model's default format, e.g. PNG).
+            quality (Literal["auto", "low", "medium", "high"], Optional): The quality of the generated images.
+                GPT image models support "auto", "high", "medium", and "low".
+                Default is to not specify, which will use "auto" behavior for platform OpenAI endpoints
+                and "high" behavior for Azure OpenAI endpoints.
+            background (Literal["transparent", "opaque", "auto"], Optional): Background behavior for
+                the generated image. When "transparent", the output format must support transparency
+                ("png" or "webp"). When "auto", the model automatically determines the best background.
+                Default is to not specify, which will use "auto" behavior.
             custom_configuration (TargetConfiguration, Optional): Override the default configuration for
                 this target instance. Defaults to None.
-            custom_capabilities (TargetCapabilities, Optional): **Deprecated.** Use
-                ``custom_configuration`` instead. Will be removed in v0.14.0.
-            *args: Additional positional arguments to be passed to AzureOpenAITarget.
             **kwargs: Additional keyword arguments to be passed to AzureOpenAITarget.
             httpx_client_kwargs (dict, Optional): Additional kwargs to be passed to the
                 `httpx.AsyncClient()` constructor.
                 For example, to specify a 3 minutes timeout: httpx_client_kwargs={"timeout": 180}
+
+        Raises:
+            ValueError: If background is "transparent" and output_format is "jpeg",
+                since JPEG does not support transparency.
         """
+        if background == "transparent" and output_format == "jpeg":
+            raise ValueError(
+                "background='transparent' requires an output format that supports transparency ('png' or 'webp'). "
+                "Got output_format='jpeg'."
+            )
+
         self.output_format = output_format
         self.quality = quality
-        self.style = style
         self.image_size = image_size
+        self.background = background
 
-        super().__init__(
-            *args, custom_configuration=custom_configuration, custom_capabilities=custom_capabilities, **kwargs
-        )
+        super().__init__(custom_configuration=custom_configuration, **kwargs)
 
     def _set_openai_env_configuration_vars(self) -> None:
         self.model_name_environment_variable = "OPENAI_IMAGE_MODEL"
@@ -141,7 +137,7 @@ class OpenAIImageTarget(OpenAITarget):
             params={
                 "image_size": self.image_size,
                 "quality": self.quality,
-                "style": self.style,
+                "background": self.background,
             },
         )
 
@@ -202,12 +198,12 @@ class OpenAIImageTarget(OpenAITarget):
             image_generation_args["output_format"] = self.output_format
         if self.quality:
             image_generation_args["quality"] = self.quality
-        if self.style:
-            image_generation_args["style"] = self.style
+        if self.background:
+            image_generation_args["background"] = self.background
 
         # Use unified error handler for consistent error handling
-        return await self._handle_openai_request(
-            api_call=lambda: self._async_client.images.generate(**image_generation_args),
+        return await self._handle_openai_request_async(
+            api_call=lambda: self._client.images.generate(**image_generation_args),
             request=message,
         )
 
@@ -235,16 +231,18 @@ class OpenAIImageTarget(OpenAITarget):
                 category="prompt-memory-entries", value=image_path, data_type="image_path"
             )
 
-            image_name = str(await img_serializer.get_data_filename())
-            image_bytes = await img_serializer.read_data()
-            image_type = img_serializer.get_mime_type(image_path)
+            image_name = str(await img_serializer.get_data_filename_async())
+            image_bytes = await img_serializer.read_data_async()
+            image_type = get_mime_type(image_path)
 
             image_files.append((image_name, image_bytes, image_type))
 
         # Construct request parameters for image editing
         image_edit_args: dict[str, Any] = {
             "model": self._model_name,
-            "image": image_files,
+            # Single image sent as a tuple (mandatory for targets that support only one image input such as MAI,
+            # also supported by other targets such as OpenAI). Multiple images always sent as a list.
+            "image": image_files[0] if len(image_files) == 1 else image_files,
             "prompt": text_prompt,
             "size": self.image_size,
         }
@@ -253,15 +251,15 @@ class OpenAIImageTarget(OpenAITarget):
             image_edit_args["output_format"] = self.output_format
         if self.quality:
             image_edit_args["quality"] = self.quality
-        if self.style:
-            image_edit_args["style"] = self.style
+        if self.background:
+            image_edit_args["background"] = self.background
 
-        return await self._handle_openai_request(
-            api_call=lambda: self._async_client.images.edit(**image_edit_args),
+        return await self._handle_openai_request_async(
+            api_call=lambda: self._client.images.edit(**image_edit_args),
             request=message,
         )
 
-    async def _construct_message_from_response(self, response: Any, request: Any) -> Message:
+    async def _construct_message_from_response_async(self, response: Any, request: Any) -> Message:
         """
         Construct a Message from an ImagesResponse.
 
@@ -276,7 +274,7 @@ class OpenAIImageTarget(OpenAITarget):
             EmptyResponseException: If the image generation returned an empty response.
         """
         image_data = response.data[0]
-        image_bytes = await self._get_image_bytes(image_data)
+        image_bytes = await self._get_image_bytes_async(image_data)
 
         extension = self.output_format or "png"
         data = data_serializer_factory(
@@ -284,18 +282,17 @@ class OpenAIImageTarget(OpenAITarget):
             data_type="image_path",
             extension=extension,
         )
-        await data.save_data(data=image_bytes)
+        await data.save_data_async(data=image_bytes)
 
         return construct_response_from_request(
             request=request, response_text_pieces=[data.value], response_type="image_path"
         )
 
-    async def _get_image_bytes(self, image_data: Any) -> bytes:
+    async def _get_image_bytes_async(self, image_data: Any) -> bytes:
         """
         Extract image bytes from the API response.
 
-        Handles both base64-encoded data and URL responses. Some models (like gpt-image-1)
-        return base64 directly, while others (like dall-e) may return URLs.
+        GPT image models always return base64-encoded data.
 
         Args:
             image_data: The image data object from the API response.
@@ -304,21 +301,11 @@ class OpenAIImageTarget(OpenAITarget):
             bytes: The raw image bytes.
 
         Raises:
-            EmptyResponseException: If neither base64 data nor URL is available.
+            EmptyResponseException: If base64 data is not available.
         """
-        # Try base64 first (preferred format)
         b64_data = getattr(image_data, "b64_json", None)
         if b64_data:
             return base64.b64decode(b64_data)
-
-        # Fall back to URL download
-        image_url = getattr(image_data, "url", None)
-        if image_url:
-            logger.info("Image model returned URL. Downloading image.")
-            async with httpx.AsyncClient() as http_client:
-                image_response = await http_client.get(image_url)
-                image_response.raise_for_status()
-                return image_response.content
 
         raise EmptyResponseException(message="The image generation returned an empty response.")
 

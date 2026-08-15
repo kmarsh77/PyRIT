@@ -2,7 +2,6 @@
 # Licensed under the MIT license.
 
 import pathlib
-from typing import Optional
 
 from pyrit.common.apply_defaults import apply_defaults
 from pyrit.common.path import CONVERTER_SEED_PROMPT_PATH
@@ -10,7 +9,7 @@ from pyrit.executor.promptgen.fuzzer.fuzzer_converter_base import (
     FuzzerConverter,
 )
 from pyrit.models import SeedPrompt
-from pyrit.prompt_target import PromptChatTarget
+from pyrit.prompt_target import PromptTarget
 
 
 class FuzzerShortenConverter(FuzzerConverter):
@@ -20,8 +19,8 @@ class FuzzerShortenConverter(FuzzerConverter):
 
     @apply_defaults
     def __init__(
-        self, *, converter_target: Optional[PromptChatTarget] = None, prompt_template: Optional[SeedPrompt] = None
-    ):
+        self, *, converter_target: PromptTarget | None = None, prompt_template: SeedPrompt | None = None
+    ) -> None:
         """Initialize the shorten converter with optional chat target and prompt template."""
         prompt_template = (
             prompt_template

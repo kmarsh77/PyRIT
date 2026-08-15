@@ -8,7 +8,8 @@ from typing import Any
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
-from pyrit.models import SeedDataset, SeedPrompt
+from pyrit.models import Modality, SeedDataset, SeedPrompt, SeedUnion
+from pyrit.models.harm_category import HarmCategory
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,11 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
 
     HF_DATASET_NAME: str = "lmsys/toxic-chat"
 
+    # Metadata
+    modalities: tuple[Modality, ...] = (Modality.TEXT,)
+    size: str = "huge"  # 5082 real user-chatbot conversations from Chatbot Arena
+    tags: frozenset[str] = frozenset({"default", "safety", "multiturn"})
+
     OPENAI_MODERATION_THRESHOLD: float = 0.8
 
     def __init__(
@@ -39,7 +45,7 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
         *,
         config: str = "toxicchat0124",
         split: str = "train",
-    ):
+    ) -> None:
         """
         Initialize the ToxicChat dataset loader.
 
@@ -52,7 +58,7 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
 
     @property
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "toxic_chat"
 
     def _extract_harm_categories(self, item: dict[str, Any]) -> list[str]:
@@ -83,7 +89,7 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
 
         return categories
 
-    async def fetch_dataset(self, *, cache: bool = True) -> SeedDataset:
+    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch ToxicChat dataset from HuggingFace and return as SeedDataset.
 
@@ -95,7 +101,7 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
         """
         logger.info(f"Loading ToxicChat dataset from {self.HF_DATASET_NAME}")
 
-        data = await self._fetch_from_huggingface(
+        data = await self._fetch_from_huggingface_async(
             dataset_name=self.HF_DATASET_NAME,
             config=self.config,
             split=self.split,
@@ -120,10 +126,42 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
         source_url = f"https://huggingface.co/datasets/{self.HF_DATASET_NAME}"
         groups = ["UC San Diego"]
 
-        seed_prompts: list[SeedPrompt] = []
+        # toxicity/jailbreaking flags plus OpenAI-moderation category names are not in the
+        # generic alias table, so map them (and broaden the too-narrow "violence") here.
+        toxic_chat_alias_overrides: dict[str, list[HarmCategory]] = {
+            "toxicity": [HarmCategory.HARASSMENT],
+            "jailbreaking": [HarmCategory.DECEPTION],
+            "hate": [HarmCategory.HATE_SPEECH, HarmCategory.REPRESENTATIONAL],
+            "hate/threatening": [HarmCategory.HATE_SPEECH, HarmCategory.VIOLENT_THREATS],
+            "harassment/threatening": [HarmCategory.HARASSMENT, HarmCategory.VIOLENT_THREATS],
+            "self-harm/intent": [HarmCategory.SELF_HARM],
+            "self-harm/instructions": [HarmCategory.SELF_HARM],
+            "sexual/minors": [HarmCategory.SEXUALIZATION, HarmCategory.SEXUAL_CONTENT],
+            "violence": [HarmCategory.VIOLENT_CONTENT, HarmCategory.VIOLENT_THREATS],
+            "violence/graphic": [HarmCategory.VIOLENT_CONTENT],
+        }
+        seed_prompts: list[SeedUnion] = []
         for item in data:
             user_input = item["user_input"]
-            harm_categories = self._extract_harm_categories(item)
+            raw_harm_categories = self._extract_harm_categories(item)
+
+            # Standardize harm categories
+            standardized_categories = self._standardize_harm_categories(
+                raw_harm_categories,
+                alias_overrides=toxic_chat_alias_overrides,
+            )
+
+            # Preserve full row metadata except fields projected to top-level seed fields.
+            metadata: dict[str, str | int] = {}
+            for key, value in item.items():
+                if key == "user_input" or value is None:
+                    continue
+
+                if isinstance(value, (str, int)):
+                    metadata[key] = value
+                else:
+                    metadata[key] = json.dumps(value)
+
             prompt = SeedPrompt(
                 value=user_input,
                 data_type="text",
@@ -132,12 +170,8 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
                 source=source_url,
                 authors=authors,
                 groups=groups,
-                harm_categories=harm_categories,
-                metadata={
-                    "toxicity": str(item.get("toxicity", "")),
-                    "jailbreaking": str(item.get("jailbreaking", "")),
-                    "human_annotation": str(item.get("human_annotation", "")),
-                },
+                harm_categories=standardized_categories,
+                metadata=metadata,
             )
             seed_prompts.append(prompt)
 

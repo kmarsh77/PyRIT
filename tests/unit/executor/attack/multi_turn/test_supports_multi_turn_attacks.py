@@ -27,7 +27,8 @@ def _make_strategy(*, supports_multi_turn: bool):
 
     target = MagicMock()
     target.capabilities.supports_multi_turn = supports_multi_turn
-    target.get_identifier.return_value = MagicMock()
+    target.configuration.includes.return_value = supports_multi_turn
+    target.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
 
     with patch.multiple(
         MultiTurnAttackStrategy,
@@ -138,7 +139,7 @@ class TestSystemPromptCarryoverOnRotation:
         assert new_id != old_id
 
         memory = CentralMemory.get_memory_instance()
-        new_messages = memory.get_conversation(conversation_id=new_id)
+        new_messages = memory.get_conversation_messages(conversation_id=new_id)
 
         # Only the system message should be in the new conversation (not the user message)
         assert len(new_messages) == 1
@@ -161,7 +162,7 @@ class TestSystemPromptCarryoverOnRotation:
             context.executed_turns = turn
             strategy._rotate_conversation_for_single_turn_target(context=context)
 
-            messages = memory.get_conversation(conversation_id=context.session.conversation_id)
+            messages = memory.get_conversation_messages(conversation_id=context.session.conversation_id)
             system_msgs = [m for m in messages if m.api_role == "system"]
             assert len(system_msgs) == 1, f"Turn {turn}: expected 1 system message, got {len(system_msgs)}"
             assert system_msgs[0].get_value() == "You are an expert."
@@ -195,7 +196,7 @@ class TestSystemPromptCarryoverOnRotation:
         strategy._rotate_conversation_for_single_turn_target(context=context)
 
         assert context.session.conversation_id != old_id
-        new_messages = memory.get_conversation(conversation_id=context.session.conversation_id)
+        new_messages = memory.get_conversation_messages(conversation_id=context.session.conversation_id)
         assert len(new_messages) == 0
 
     def test_user_messages_not_carried_over(self):
@@ -228,7 +229,7 @@ class TestSystemPromptCarryoverOnRotation:
         context.executed_turns = 1
         strategy._rotate_conversation_for_single_turn_target(context=context)
 
-        new_messages = memory.get_conversation(conversation_id=context.session.conversation_id)
+        new_messages = memory.get_conversation_messages(conversation_id=context.session.conversation_id)
         roles = [m.api_role for m in new_messages]
         assert roles == ["system"], f"Expected only system, got {roles}"
 
@@ -263,7 +264,7 @@ class TestSystemPromptCarryoverOnRotation:
         context.executed_turns = 1
         strategy._rotate_conversation_for_single_turn_target(context=context)
 
-        new_messages = memory.get_conversation(conversation_id=context.session.conversation_id)
+        new_messages = memory.get_conversation_messages(conversation_id=context.session.conversation_id)
         system_values = sorted(m.get_value() for m in new_messages if m.api_role == "system")
         assert system_values == ["Safety instructions", "System prompt 1"]
         assert all(m.api_role == "system" for m in new_messages)
@@ -280,7 +281,7 @@ class TestSystemPromptCarryoverOnRotation:
 
         assert context.session.conversation_id != old_id
         memory = CentralMemory.get_memory_instance()
-        new_messages = memory.get_conversation(conversation_id=context.session.conversation_id)
+        new_messages = memory.get_conversation_messages(conversation_id=context.session.conversation_id)
         assert len(new_messages) == 0
 
     def test_only_system_messages_all_carried_over(self):
@@ -300,7 +301,7 @@ class TestSystemPromptCarryoverOnRotation:
         context.executed_turns = 1
         strategy._rotate_conversation_for_single_turn_target(context=context)
 
-        new_messages = memory.get_conversation(conversation_id=context.session.conversation_id)
+        new_messages = memory.get_conversation_messages(conversation_id=context.session.conversation_id)
         assert len(new_messages) == 1
         assert new_messages[0].api_role == "system"
         assert new_messages[0].get_value() == "Only a system message"
@@ -336,7 +337,7 @@ class TestSystemPromptCarryoverOnRotation:
         context.executed_turns = 1
         strategy._rotate_conversation_for_single_turn_target(context=context)
 
-        new_messages = memory.get_conversation(conversation_id=context.session.conversation_id)
+        new_messages = memory.get_conversation_messages(conversation_id=context.session.conversation_id)
         assert len(new_messages) == 1
         assert new_messages[0].api_role == "system"
         # Both pieces should be present in the duplicated message
@@ -361,7 +362,7 @@ class TestSystemPromptCarryoverOnRotation:
         strategy._rotate_conversation_for_single_turn_target(context=context)
 
         # Old conversation should still have both messages intact
-        old_messages = memory.get_conversation(conversation_id=old_id)
+        old_messages = memory.get_conversation_messages(conversation_id=old_id)
         old_roles = [m.api_role for m in old_messages]
         assert old_roles == ["system", "user"]
 
@@ -372,17 +373,23 @@ class TestTAPNodeDuplicateSystemMessages:
 
     def _make_tap_node(self, *, supports_multi_turn: bool):
         """Create a minimal _TreeOfAttacksNode for testing."""
+        from pyrit.executor.attack.component.modality_router import _ModalityFeedbackRouter
         from pyrit.executor.attack.multi_turn.tree_of_attacks import _TreeOfAttacksNode
 
         target = MagicMock()
         target.capabilities.supports_multi_turn = supports_multi_turn
-        target.get_identifier.return_value = MagicMock()
+        target.configuration.includes.return_value = supports_multi_turn
+        target.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+        target.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
+        target.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
 
         adversarial_chat = MagicMock()
-        adversarial_chat.get_identifier.return_value = MagicMock()
+        adversarial_chat.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
+        adversarial_chat.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+        adversarial_chat.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
 
         scorer = MagicMock()
-        scorer.get_identifier.return_value = MagicMock()
+        scorer.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
 
         seed = MagicMock()
         seed.render_template_value.return_value = "template"
@@ -401,6 +408,10 @@ class TestTAPNodeDuplicateSystemMessages:
             auxiliary_scorers=None,
             attack_id=MagicMock(),
             attack_strategy_name="TAP",
+            modality_router=_ModalityFeedbackRouter(
+                adversarial_chat=adversarial_chat,
+                objective_target=target,
+            ),
         )
 
     def test_single_turn_target_duplicates_only_system_messages(self):
@@ -435,7 +446,7 @@ class TestTAPNodeDuplicateSystemMessages:
         assert duplicate.objective_target_conversation_id != node.objective_target_conversation_id
 
         # The duplicate's conversation should contain only the system message
-        dup_messages = memory.get_conversation(conversation_id=duplicate.objective_target_conversation_id)
+        dup_messages = memory.get_conversation_messages(conversation_id=duplicate.objective_target_conversation_id)
         assert len(dup_messages) == 1
         assert dup_messages[0].api_role == "system"
         assert dup_messages[0].get_value() == "TAP system prompt"
@@ -470,7 +481,7 @@ class TestTAPNodeDuplicateSystemMessages:
 
         assert duplicate.objective_target_conversation_id != node.objective_target_conversation_id
 
-        dup_messages = memory.get_conversation(conversation_id=duplicate.objective_target_conversation_id)
+        dup_messages = memory.get_conversation_messages(conversation_id=duplicate.objective_target_conversation_id)
         roles = [m.api_role for m in dup_messages]
         assert roles == ["system", "user", "assistant"]
 
@@ -491,7 +502,7 @@ class TestTAPNodeDuplicateSystemMessages:
         duplicate = node.duplicate()
 
         assert duplicate.objective_target_conversation_id != node.objective_target_conversation_id
-        dup_messages = memory.get_conversation(conversation_id=duplicate.objective_target_conversation_id)
+        dup_messages = memory.get_conversation_messages(conversation_id=duplicate.objective_target_conversation_id)
         assert len(dup_messages) == 0
 
     def test_adversarial_chat_always_fully_duplicated(self):
@@ -525,7 +536,7 @@ class TestTAPNodeDuplicateSystemMessages:
 
         duplicate = node.duplicate()
 
-        dup_adv_messages = memory.get_conversation(conversation_id=duplicate.adversarial_chat_conversation_id)
+        dup_adv_messages = memory.get_conversation_messages(conversation_id=duplicate.adversarial_chat_conversation_id)
         roles = [m.api_role for m in dup_adv_messages]
         assert roles == ["system", "user"]
 
@@ -556,7 +567,7 @@ class TestTAPNodeDuplicateSystemMessages:
 
         duplicate = node.duplicate()
 
-        dup_messages = memory.get_conversation(conversation_id=duplicate.objective_target_conversation_id)
+        dup_messages = memory.get_conversation_messages(conversation_id=duplicate.objective_target_conversation_id)
         assert all(m.api_role == "system" for m in dup_messages)
         dup_values = sorted(m.get_value() for m in dup_messages)
         assert dup_values == ["System prompt A", "System prompt B"]
@@ -570,7 +581,7 @@ class TestTAPNodeDuplicateSystemMessages:
         duplicate = node.duplicate()
 
         assert duplicate.objective_target_conversation_id != node.objective_target_conversation_id
-        dup_messages = memory.get_conversation(conversation_id=duplicate.objective_target_conversation_id)
+        dup_messages = memory.get_conversation_messages(conversation_id=duplicate.objective_target_conversation_id)
         assert len(dup_messages) == 0
 
     def test_duplicate_node_has_correct_parent_id(self):
@@ -613,7 +624,7 @@ class TestTAPNodeDuplicateSystemMessages:
 
         duplicate = node.duplicate()
 
-        dup_messages = memory.get_conversation(conversation_id=duplicate.objective_target_conversation_id)
+        dup_messages = memory.get_conversation_messages(conversation_id=duplicate.objective_target_conversation_id)
         assert len(dup_messages) == 1
         assert dup_messages[0].get_value() == long_prompt
 
@@ -639,7 +650,7 @@ class TestTAPNodeDuplicateSystemMessages:
         node.duplicate()
 
         # Original conversation should still have both messages
-        orig_messages = memory.get_conversation(conversation_id=node.objective_target_conversation_id)
+        orig_messages = memory.get_conversation_messages(conversation_id=node.objective_target_conversation_id)
         orig_roles = [m.api_role for m in orig_messages]
         assert orig_roles == ["system", "user"]
 
@@ -671,7 +682,7 @@ class TestTAPNodeDuplicateSystemMessages:
 
         duplicate = node.duplicate()
 
-        dup_messages = memory.get_conversation(conversation_id=duplicate.objective_target_conversation_id)
+        dup_messages = memory.get_conversation_messages(conversation_id=duplicate.objective_target_conversation_id)
         assert len(dup_messages) == 1
         assert dup_messages[0].api_role == "system"
         assert len(dup_messages[0].message_pieces) == 2
@@ -684,16 +695,22 @@ class TestValueErrorGuards:
     """Test that incompatible attacks raise ValueError for single-turn targets."""
 
     def _make_single_turn_target(self):
+        from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
+        from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+
         target = MagicMock()
         target.capabilities.supports_multi_turn = False
-        target.get_identifier.return_value = MagicMock()
+        target.configuration = TargetConfiguration(
+            capabilities=TargetCapabilities(supports_multi_turn=False, supports_system_prompt=True),
+        )
+        target.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
         return target
 
     def _make_adversarial_config(self):
         from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig
 
         adversarial_chat = MagicMock()
-        adversarial_chat.get_identifier.return_value = MagicMock()
+        adversarial_chat.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
         return AttackAdversarialConfig(target=adversarial_chat)
 
     def _make_scoring_config(self):
@@ -701,57 +718,36 @@ class TestValueErrorGuards:
         from pyrit.score import TrueFalseScorer
 
         scorer = MagicMock(spec=TrueFalseScorer)
-        scorer.get_identifier.return_value = MagicMock()
+        scorer.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
         return AttackScoringConfig(objective_scorer=scorer)
 
-    @pytest.mark.asyncio
     async def test_crescendo_raises_for_single_turn_target(self):
-        from pyrit.executor.attack.multi_turn.crescendo import CrescendoAttack, CrescendoAttackContext
+        from pyrit.executor.attack.multi_turn.crescendo import CrescendoAttack
 
         target = self._make_single_turn_target()
-        attack = CrescendoAttack(
-            objective_target=target,
-            attack_adversarial_config=self._make_adversarial_config(),
-            attack_scoring_config=self._make_scoring_config(),
-        )
 
-        context = CrescendoAttackContext(
-            params=AttackParameters(objective="Test"),
-        )
+        with pytest.raises(ValueError, match="supports_multi_turn"):
+            CrescendoAttack(
+                objective_target=target,
+                attack_adversarial_config=self._make_adversarial_config(),
+                attack_scoring_config=self._make_scoring_config(),
+            )
 
-        with pytest.raises(ValueError, match="CrescendoAttack requires a multi-turn target"):
-            await attack._setup_async(context=context)
-
-    @pytest.mark.asyncio
     async def test_multi_prompt_sending_raises_for_single_turn_target(self):
         from pyrit.executor.attack.multi_turn.multi_prompt_sending import MultiPromptSendingAttack
 
         target = self._make_single_turn_target()
-        attack = MultiPromptSendingAttack(objective_target=target)
 
-        context = MultiTurnAttackContext(
-            params=AttackParameters(objective="Test"),
-        )
+        with pytest.raises(ValueError, match="supports_multi_turn"):
+            MultiPromptSendingAttack(objective_target=target)
 
-        with pytest.raises(ValueError, match="MultiPromptSendingAttack requires a multi-turn target"):
-            await attack._setup_async(context=context)
-
-    @pytest.mark.asyncio
     async def test_chunked_request_raises_for_single_turn_target(self):
-        from pyrit.executor.attack.multi_turn.chunked_request import (
-            ChunkedRequestAttack,
-            ChunkedRequestAttackContext,
-        )
+        from pyrit.executor.attack.multi_turn.chunked_request import ChunkedRequestAttack
 
         target = self._make_single_turn_target()
-        attack = ChunkedRequestAttack(objective_target=target)
 
-        context = ChunkedRequestAttackContext(
-            params=AttackParameters(objective="Test"),
-        )
-
-        with pytest.raises(ValueError, match="ChunkedRequestAttack requires a multi-turn target"):
-            await attack._setup_async(context=context)
+        with pytest.raises(ValueError, match="supports_multi_turn"):
+            ChunkedRequestAttack(objective_target=target)
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -760,17 +756,23 @@ class TestTAPBranchingPreservesSystemPrompts:
 
     def _make_tap_node(self, *, supports_multi_turn: bool):
         """Create a _TreeOfAttacksNode with real memory."""
+        from pyrit.executor.attack.component.modality_router import _ModalityFeedbackRouter
         from pyrit.executor.attack.multi_turn.tree_of_attacks import _TreeOfAttacksNode
 
         target = MagicMock()
         target.capabilities.supports_multi_turn = supports_multi_turn
-        target.get_identifier.return_value = MagicMock()
+        target.configuration.includes.return_value = supports_multi_turn
+        target.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+        target.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
+        target.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
 
         adversarial_chat = MagicMock()
-        adversarial_chat.get_identifier.return_value = MagicMock()
+        adversarial_chat.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
+        adversarial_chat.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+        adversarial_chat.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
 
         scorer = MagicMock()
-        scorer.get_identifier.return_value = MagicMock()
+        scorer.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
 
         seed = MagicMock()
         seed.render_template_value.return_value = "template"
@@ -789,6 +791,10 @@ class TestTAPBranchingPreservesSystemPrompts:
             auxiliary_scorers=None,
             attack_id=MagicMock(),
             attack_strategy_name="TAP",
+            modality_router=_ModalityFeedbackRouter(
+                adversarial_chat=adversarial_chat,
+                objective_target=target,
+            ),
         )
 
     def test_branching_single_turn_target_preserves_system_across_depths(self):
@@ -827,7 +833,7 @@ class TestTAPBranchingPreservesSystemPrompts:
         # Depth 2: branch (duplicate) — single-turn means only system msg is copied
         branch1 = node.duplicate()
 
-        branch1_msgs = memory.get_conversation(conversation_id=branch1.objective_target_conversation_id)
+        branch1_msgs = memory.get_conversation_messages(conversation_id=branch1.objective_target_conversation_id)
         assert len(branch1_msgs) == 1
         assert branch1_msgs[0].api_role == "system"
         assert branch1_msgs[0].get_value() == "You are a red team assistant."
@@ -848,13 +854,13 @@ class TestTAPBranchingPreservesSystemPrompts:
         memory.add_message_pieces_to_memory(message_pieces=[user2, asst2])
 
         # Verify branch1 now has system + user + assistant
-        branch1_full = memory.get_conversation(conversation_id=branch1.objective_target_conversation_id)
+        branch1_full = memory.get_conversation_messages(conversation_id=branch1.objective_target_conversation_id)
         assert [m.api_role for m in branch1_full] == ["system", "user", "assistant"]
 
         # Depth 3: branch again from branch1
         branch2 = branch1.duplicate()
 
-        branch2_msgs = memory.get_conversation(conversation_id=branch2.objective_target_conversation_id)
+        branch2_msgs = memory.get_conversation_messages(conversation_id=branch2.objective_target_conversation_id)
         assert len(branch2_msgs) == 1
         assert branch2_msgs[0].api_role == "system"
         assert branch2_msgs[0].get_value() == "You are a red team assistant."
@@ -887,7 +893,7 @@ class TestTAPBranchingPreservesSystemPrompts:
 
         branch = node.duplicate()
 
-        branch_msgs = memory.get_conversation(conversation_id=branch.objective_target_conversation_id)
+        branch_msgs = memory.get_conversation_messages(conversation_id=branch.objective_target_conversation_id)
         assert [m.api_role for m in branch_msgs] == ["system", "user", "assistant"]
 
         # Add another turn on the branch
@@ -901,5 +907,5 @@ class TestTAPBranchingPreservesSystemPrompts:
 
         # Branch again — should have all 4 messages
         branch2 = branch.duplicate()
-        branch2_msgs = memory.get_conversation(conversation_id=branch2.objective_target_conversation_id)
+        branch2_msgs = memory.get_conversation_messages(conversation_id=branch2.objective_target_conversation_id)
         assert [m.api_role for m in branch2_msgs] == ["system", "user", "assistant", "user"]

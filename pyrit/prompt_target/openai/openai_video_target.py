@@ -2,23 +2,17 @@
 # Licensed under the MIT license.
 
 import logging
-import os
-from mimetypes import guess_type
-from typing import Any, Optional, Union, cast
+from pathlib import Path
+from typing import Any, cast
 
 from openai.types import VideoSeconds, VideoSize
 
+from pyrit.common import forward_init_parameters, get_mime_type
 from pyrit.exceptions import (
     pyrit_target_retry,
 )
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import (
-    DataTypeSerializer,
-    Message,
-    MessagePiece,
-    construct_response_from_request,
-    data_serializer_factory,
-)
+from pyrit.memory import data_serializer_factory
+from pyrit.models import ComponentIdentifier, Message, MessagePiece, construct_response_from_request
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
@@ -62,13 +56,13 @@ class OpenAIVideoTarget(OpenAITarget):
         )
     )
 
+    @forward_init_parameters
     def __init__(
         self,
         *,
         resolution_dimensions: VideoSize = "1280x720",
         n_seconds: int | VideoSeconds = 4,
-        custom_configuration: Optional[TargetConfiguration] = None,
-        custom_capabilities: Optional[TargetCapabilities] = None,
+        custom_configuration: TargetConfiguration | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -96,8 +90,6 @@ class OpenAIVideoTarget(OpenAITarget):
                 Defaults to 4.
             custom_configuration (TargetConfiguration, Optional): Override the default configuration for
                 this target instance. Defaults to None.
-            custom_capabilities (TargetCapabilities, Optional): **Deprecated.** Use
-                ``custom_configuration`` instead. Will be removed in v0.14.0.
             **kwargs: Additional keyword arguments passed to the parent OpenAITarget class.
             httpx_client_kwargs (dict, Optional): Additional kwargs to be passed to the ``httpx.AsyncClient()``
                 constructor. For example, to specify a 3 minute timeout: ``httpx_client_kwargs={"timeout": 180}``
@@ -107,7 +99,7 @@ class OpenAIVideoTarget(OpenAITarget):
             MessagePiece. The video_id is returned in the response metadata after any successful
             generation (``response.message_pieces[0].prompt_metadata["video_id"]"").
         """
-        super().__init__(custom_configuration=custom_configuration, custom_capabilities=custom_capabilities, **kwargs)
+        super().__init__(custom_configuration=custom_configuration, **kwargs)
 
         self._n_seconds: VideoSeconds = (
             cast("VideoSeconds", str(n_seconds)) if isinstance(n_seconds, int) else n_seconds
@@ -209,6 +201,8 @@ class OpenAIVideoTarget(OpenAITarget):
         message = normalized_conversation[-1]
 
         text_piece = message.get_piece_by_type(data_type="text")
+        if text_piece is None:
+            raise ValueError("No text piece found in message")
 
         # Validate video_path pieces for remix mode (does not strip them)
         self._validate_video_remix_pieces(message=message)
@@ -245,7 +239,7 @@ class OpenAIVideoTarget(OpenAITarget):
             The response Message with the generated video path.
         """
         logger.info(f"Remix mode: Creating variation of video {video_id}")
-        return await self._handle_openai_request(
+        return await self._handle_openai_request_async(
             api_call=lambda: self._remix_and_poll_async(video_id=video_id, prompt=prompt),
             request=request,
         )
@@ -266,8 +260,8 @@ class OpenAIVideoTarget(OpenAITarget):
         """
         logger.info("Text+Image-to-video mode: Using image as first frame")
         input_file = await self._prepare_image_input_async(image_piece=image_piece)
-        return await self._handle_openai_request(
-            api_call=lambda: self._async_client.videos.create_and_poll(
+        return await self._handle_openai_request_async(
+            api_call=lambda: self._client.videos.create_and_poll(
                 model=self._model_name,
                 prompt=prompt,
                 size=self._size,
@@ -288,8 +282,8 @@ class OpenAIVideoTarget(OpenAITarget):
         Returns:
             The response Message with the generated video path.
         """
-        return await self._handle_openai_request(
-            api_call=lambda: self._async_client.videos.create_and_poll(
+        return await self._handle_openai_request_async(
+            api_call=lambda: self._client.videos.create_and_poll(
                 model=self._model_name,
                 prompt=prompt,
                 size=self._size,
@@ -317,18 +311,16 @@ class OpenAIVideoTarget(OpenAITarget):
         image_serializer = data_serializer_factory(
             value=image_path, data_type="image_path", category="prompt-memory-entries"
         )
-        image_bytes = await image_serializer.read_data()
+        image_bytes = await image_serializer.read_data_async()
 
-        mime_type = DataTypeSerializer.get_mime_type(image_path)
-        if not mime_type:
-            mime_type, _ = guess_type(image_path, strict=False)
+        mime_type = get_mime_type(image_path)
         if not mime_type or mime_type not in self.SUPPORTED_IMAGE_FORMATS:
             raise ValueError(
                 f"Unsupported image format: {mime_type or 'unknown'}. "
                 f"Supported formats: {', '.join(self.SUPPORTED_IMAGE_FORMATS)}"
             )
 
-        filename = os.path.basename(image_path)
+        filename = Path(image_path).name
         return (filename, image_bytes, mime_type)
 
     async def _remix_and_poll_async(self, *, video_id: str, prompt: str) -> Any:
@@ -345,11 +337,11 @@ class OpenAIVideoTarget(OpenAITarget):
         Returns:
             The completed Video object from the OpenAI SDK.
         """
-        video = await self._async_client.videos.remix(video_id, prompt=prompt)
+        video = await self._client.videos.remix(video_id, prompt=prompt)
 
         # Poll until completion if not already done
         if video.status not in ["completed", "failed"]:
-            video = await self._async_client.videos.poll(video.id)
+            video = await self._client.videos.poll(video.id)
 
         return video
 
@@ -377,7 +369,7 @@ class OpenAIVideoTarget(OpenAITarget):
             return _is_content_filter_error(response_dict)
         return False
 
-    async def _construct_message_from_response(self, response: Any, request: Any) -> Message:
+    async def _construct_message_from_response_async(self, response: Any, request: Any) -> Message:
         """
         Construct a Message from a video response.
 
@@ -399,12 +391,12 @@ class OpenAIVideoTarget(OpenAITarget):
                 logger.info(f"Video was remixed from: {video.remixed_from_video_id}")
 
             # Download video content using SDK
-            video_response = await self._async_client.videos.download_content(video.id)
+            video_response = await self._client.videos.download_content(video.id)
             # Extract bytes from HttpxBinaryResponseContent
             video_content = video_response.content
 
             # Save the video to storage (include video.id for chaining remixes)
-            return await self._save_video_response(request=request, video_data=video_content, video_id=video.id)
+            return await self._save_video_response_async(request=request, video_data=video_content, video_id=video.id)
 
         if video.status == "failed":
             # Handle failed video generation (non-content-filter)
@@ -428,8 +420,8 @@ class OpenAIVideoTarget(OpenAITarget):
             error="unknown",
         )
 
-    async def _save_video_response(
-        self, *, request: MessagePiece, video_data: bytes, video_id: Optional[str] = None
+    async def _save_video_response_async(
+        self, *, request: MessagePiece, video_data: bytes, video_id: str | None = None
     ) -> Message:
         """
         Save video data to storage and construct response.
@@ -444,13 +436,13 @@ class OpenAIVideoTarget(OpenAITarget):
         """
         # Save video using data serializer
         data = data_serializer_factory(category="prompt-memory-entries", data_type="video_path")
-        await data.save_data(data=video_data)
+        await data.save_data_async(data=video_data)
         video_path = data.value
 
         logger.info(f"Video saved to: {video_path}")
 
         # Include video_id in metadata for chaining (e.g., remix the generated video later)
-        prompt_metadata: Optional[dict[str, Union[str, int]]] = {"video_id": video_id} if video_id else None
+        prompt_metadata: dict[str, str | int] | None = {"video_id": video_id} if video_id else None
 
         # Construct response
         return construct_response_from_request(

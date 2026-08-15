@@ -20,7 +20,7 @@ def register_error_handlers(app: FastAPI) -> None:
     """Register all error handlers with the FastAPI app."""
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(
+    async def validation_exception_handler(  # pyrit-async-suffix-exempt
         request: Request,
         exc: RequestValidationError,
     ) -> JSONResponse:
@@ -38,7 +38,7 @@ def register_error_handlers(app: FastAPI) -> None:
                     field=field_path,
                     message=error["msg"],
                     code=error["type"],
-                )  # type: ignore[call-arg]
+                )
             )
 
         problem = ProblemDetail(
@@ -56,7 +56,7 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(ValueError)
-    async def value_error_handler(
+    async def value_error_handler(  # pyrit-async-suffix-exempt
         request: Request,
         exc: ValueError,
     ) -> JSONResponse:
@@ -72,7 +72,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
             instance=str(request.url.path),
-        )  # type: ignore[call-arg]
+        )
 
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -80,7 +80,7 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(FileNotFoundError)
-    async def not_found_handler(
+    async def not_found_handler(  # pyrit-async-suffix-exempt
         request: Request,
         exc: FileNotFoundError,
     ) -> JSONResponse:
@@ -96,7 +96,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
             instance=str(request.url.path),
-        )  # type: ignore[call-arg]
+        )
 
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -104,7 +104,7 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(PermissionError)
-    async def permission_error_handler(
+    async def permission_error_handler(  # pyrit-async-suffix-exempt
         request: Request,
         exc: PermissionError,
     ) -> JSONResponse:
@@ -120,7 +120,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
             instance=str(request.url.path),
-        )  # type: ignore[call-arg]
+        )
 
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -128,7 +128,7 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(NotImplementedError)
-    async def not_implemented_handler(
+    async def not_implemented_handler(  # pyrit-async-suffix-exempt
         request: Request,
         exc: NotImplementedError,
     ) -> JSONResponse:
@@ -144,7 +144,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status=status.HTTP_501_NOT_IMPLEMENTED,
             detail=str(exc) or "This feature is not yet implemented",
             instance=str(request.url.path),
-        )  # type: ignore[call-arg]
+        )
 
         return JSONResponse(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -152,7 +152,7 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def generic_exception_handler(
+    async def generic_exception_handler(  # pyrit-async-suffix-exempt
         request: Request,
         exc: Exception,
     ) -> JSONResponse:
@@ -175,7 +175,7 @@ def register_error_handlers(app: FastAPI) -> None:
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred",
             instance=str(request.url.path),
-        )  # type: ignore[call-arg]
+        )
 
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -14,7 +14,7 @@ from pyrit.datasets.seed_datasets.remote import _SimpleSafetyTestsDataset, _XSTe
 from pyrit.datasets.seed_datasets.seed_metadata import (
     SeedDatasetFilter,
 )
-from pyrit.models import SeedDataset, SeedPrompt
+from pyrit.models import ComponentIdentifier, SeedDataset, SeedPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Smoke-test providers covering the three distinct fetch paths:
 #   - local YAML (no network)
 #   - remote URL-based (_fetch_from_url via GitHub)
-#   - remote HuggingFace (_fetch_from_huggingface)
+#   - remote HuggingFace (_fetch_from_huggingface_async)
 _all_providers = SeedDatasetProvider.get_all_providers()
 _SMOKE_PROVIDERS: list[tuple[str, type]] = [
     ("LocalDataset_access_shell_commands", _all_providers["LocalDataset_access_shell_commands"]),
@@ -37,19 +37,23 @@ class TestSeedDatasetSmoke:
     The exhaustive test over all providers lives in tests/end_to_end/test_all_datasets.py.
     """
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("name,provider_cls", _SMOKE_PROVIDERS, ids=[p[0] for p in _SMOKE_PROVIDERS])
-    async def test_fetch_dataset_smoke(self, name, provider_cls):
+    async def test_fetch_dataset_smoke(self, name, provider_cls, caplog):
         """
         Verify that a representative provider can be fetched successfully.
 
         Covers one local, one URL-remote, and one HuggingFace-remote provider
         to catch regressions in each fetch path without downloading all 58 datasets.
+
+        Also fails if any harm category encountered in the real data is unknown
+        (i.e., falls back to OTHER with a warning), so missing mappings are caught
+        against live dataset contents.
         """
         logger.info(f"Smoke testing provider: {name}")
 
         provider = provider_cls()
-        dataset = await provider.fetch_dataset(cache=False)
+        with caplog.at_level(logging.WARNING, logger="pyrit.models.harm_category"):
+            dataset = await provider.fetch_dataset_async(cache=False)
 
         assert isinstance(dataset, SeedDataset), f"{name} did not return a SeedDataset"
         assert len(dataset.seeds) > 0, f"{name} returned an empty dataset"
@@ -60,6 +64,13 @@ class TestSeedDatasetSmoke:
             assert seed.dataset_name == dataset.dataset_name, (
                 f"Seed dataset_name mismatch in {name}: {seed.dataset_name} != {dataset.dataset_name}"
             )
+
+        unknown_warnings = [r for r in caplog.records if "Unknown harm category" in r.message]
+        assert not unknown_warnings, (
+            f"{name} produced unknown harm categories that mapped to OTHER:\n"
+            + "\n".join(f"  - {r.message}" for r in unknown_warnings)
+            + "\nAdd alias mappings in HarmCategory._initialize_aliases or pass alias_overrides in the loader."
+        )
 
         logger.info(f"Smoke test passed for {name} with {len(dataset.seeds)} seeds")
 
@@ -102,13 +113,12 @@ class TestRemoteFilteringIntegration:
             "__module__": __name__,
             # Concrete implementations satisfy ABC requirements
             "dataset_name": property(lambda self: captured_name),
-            "fetch_dataset": _fetch_dataset,
+            "fetch_dataset_async": _fetch_dataset,
             "_fetch_from_url": lambda self, **kw: [],
         }
 
         return type(f"_Mock_{name}", (_RemoteDatasetLoader,), attrs)
 
-    @pytest.mark.asyncio
     async def test_filter_matches_correct_remote_provider(self):
         """Filter by size returns only providers that match."""
         large_cls = self._make_remote_provider_cls(
@@ -136,7 +146,6 @@ class TestRemoteFilteringIntegration:
             )
             assert names == ["large_ds"]
 
-    @pytest.mark.asyncio
     async def test_filter_all_tag_returns_everything(self):
         """tags={'all'} bypasses filtering and returns every provider."""
         cls1 = self._make_remote_provider_cls(
@@ -164,7 +173,6 @@ class TestRemoteFilteringIntegration:
             )
             assert sorted(names) == ["ds_a", "ds_b"]
 
-    @pytest.mark.asyncio
     async def test_multi_axis_filter(self):
         """Multiple filter axes are ANDed together."""
         cls1 = self._make_remote_provider_cls(
@@ -220,7 +228,6 @@ class TestLocalFilteringIntegration:
             {"__init__": make_init(yaml_path), "should_register": False, "__module__": __name__},
         )
 
-    @pytest.mark.asyncio
     async def test_local_filter_by_size(self, tmp_path):
         """Local YAML with size metadata is correctly coerced and filtered."""
         large_yaml = tmp_path / "large_ds.prompt"
@@ -263,7 +270,6 @@ class TestLocalFilteringIntegration:
             # rejects extra keys like "size" during __init__ pre-loading
             assert names == ["large_ds"]
 
-    @pytest.mark.asyncio
     async def test_local_filter_by_tags(self, tmp_path):
         """Local YAML tags (list) are coerced to set for intersection."""
         yaml_path = tmp_path / "tagged.prompt"
@@ -299,7 +305,6 @@ class TestLocalFilteringIntegration:
             )
             assert not_matched == []
 
-    @pytest.mark.asyncio
     async def test_local_no_metadata_skipped(self, tmp_path):
         """Local YAML without metadata fields is skipped when filters are provided."""
         yaml_path = tmp_path / "bare.prompt"
@@ -355,7 +360,6 @@ class TestEndToEndLocalDatasetWorkflow:
             {"__init__": make_init(yaml_path), "should_register": False, "__module__": __name__},
         )
 
-    @pytest.mark.asyncio
     async def test_user_discovers_and_fetches_filtered_dataset(self, tmp_path):
         """
         Simulate a user who wants small text datasets about cybercrime:
@@ -416,11 +420,10 @@ class TestEndToEndLocalDatasetWorkflow:
 
             # --- Step 3: User inspects metadata ---
             provider = matching_cls()
-            metadata = await provider._parse_metadata()
+            metadata = await provider._parse_metadata_async()
             assert metadata is not None
             assert metadata.harm_categories == {"cybercrime"}
 
-    @pytest.mark.asyncio
     async def test_user_fetches_unfiltered(self, tmp_path):
         """
         Without filters, get_all_dataset_names returns everything,
@@ -486,7 +489,6 @@ class TestAllTagBypassIntegration:
             {"__init__": make_init(yaml_path), "should_register": False, "__module__": __name__},
         )
 
-    @pytest.mark.asyncio
     async def test_all_tag_includes_datasets_without_metadata(self, tmp_path):
         """
         A dataset whose YAML has no metadata fields at all is normally
@@ -520,7 +522,6 @@ class TestAllTagBypassIntegration:
             )
             assert "bare_dataset" in all_names
 
-    @pytest.mark.asyncio
     async def test_all_tag_ignores_other_filter_axes(self, tmp_path):
         """
         tags={'all'} returns everything even when other filter axes
@@ -557,7 +558,6 @@ class TestAllTagBypassIntegration:
             )
             assert "small" in all_names
 
-    @pytest.mark.asyncio
     async def test_all_tag_with_mixed_metadata_and_bare_datasets(self, tmp_path):
         """
         With a mix of metadata-rich and metadata-bare datasets,
@@ -612,24 +612,22 @@ class TestHarmbenchMetadataInScenario:
     memory storage → scenario initialization.
     """
 
-    @pytest.mark.asyncio
     async def test_harmbench_metadata_parses_correctly(self):
         """HarmBench's class-level metadata is correctly parsed into sets."""
         from pyrit.datasets.seed_datasets.remote.harmbench_dataset import _HarmBenchDataset
 
         loader = _HarmBenchDataset()
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
 
         assert metadata is not None
         assert isinstance(metadata.tags, set)
         assert "default" in metadata.tags
         assert "safety" in metadata.tags
-        assert metadata.size == {"large"}
+        assert metadata.size == {"medium"}
         assert metadata.modalities == {"text"}
         assert isinstance(metadata.harm_categories, set)
         assert "cybercrime" in metadata.harm_categories
 
-    @pytest.mark.asyncio
     async def test_harmbench_discoverable_via_filter(self):
         """HarmBench can be found via tag and harm_category filters."""
         names_by_safety = await SeedDatasetProvider.get_all_dataset_names_async(
@@ -642,7 +640,6 @@ class TestHarmbenchMetadataInScenario:
         )
         assert "harmbench" in names_by_harm
 
-    @pytest.mark.asyncio
     async def test_harmbench_loads_and_stores_in_memory(self, sqlite_instance):
         """HarmBench can be fetched and stored in memory for scenario use."""
         datasets = await SeedDatasetProvider.fetch_datasets_async(
@@ -662,7 +659,6 @@ class TestHarmbenchMetadataInScenario:
         assert seed_groups is not None
         assert len(list(seed_groups)) > 0
 
-    @pytest.mark.asyncio
     async def test_red_team_agent_initializes_with_harmbench(self, sqlite_instance):
         """
         RedTeamAgent can initialize with harmbench dataset loaded in memory.
@@ -676,7 +672,7 @@ class TestHarmbenchMetadataInScenario:
         from pyrit.executor.attack.core.attack_config import AttackScoringConfig
         from pyrit.prompt_target import TextTarget
         from pyrit.scenario.scenarios.foundry.red_team_agent import (
-            FoundryStrategy,
+            FoundryTechnique,
             RedTeamAgent,
         )
         from pyrit.score.true_false.true_false_scorer import TrueFalseScorer
@@ -692,23 +688,26 @@ class TestHarmbenchMetadataInScenario:
 
         # Mock scorer to avoid Azure dependency
         mock_scorer = MagicMock(spec=TrueFalseScorer)
-        mock_scorer.get_identifier.return_value = {"__type__": "MockScorer"}
+        mock_scorer.get_identifier.return_value = ComponentIdentifier.model_validate({"__type__": "MockScorer"})
 
         target = TextTarget()
         rta = RedTeamAgent(
             adversarial_chat=target,
             attack_scoring_config=AttackScoringConfig(objective_scorer=mock_scorer),
-            include_baseline=False,
         )
 
         # This is the critical call — it loads seed groups from memory
         # and builds atomic attacks. If metadata broke the pipeline,
         # this would raise ValueError about missing seed_groups.
-        await rta.initialize_async(
-            objective_target=target,
-            max_concurrency=1,
-            scenario_strategies=[FoundryStrategy.Base64],
+        rta.set_params_from_args(
+            args={
+                "objective_target": target,
+                "max_concurrency": 1,
+                "scenario_techniques": [FoundryTechnique.Base64],
+                "include_baseline": False,
+            }
         )
+        await rta.initialize_async()
 
         # Verify the scenario got objectives from harmbench
         attacks = rta._atomic_attacks

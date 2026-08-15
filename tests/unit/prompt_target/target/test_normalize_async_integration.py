@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import warnings
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,10 +12,9 @@ if TYPE_CHECKING:
 
 import pytest
 from openai.types.chat import ChatCompletion
+from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
-from pyrit.identifiers import ComponentIdentifier
 from pyrit.memory.memory_interface import MemoryInterface
-from pyrit.message_normalizer import GenericSystemSquashNormalizer
 from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target import AzureMLChatTarget, OpenAIChatTarget
 from pyrit.prompt_target.common.target_capabilities import (
@@ -37,8 +35,6 @@ def _make_message_piece(*, role: str, content: str, conversation_id: str = "conv
         converted_value=content,
         original_value_data_type="text",
         converted_value_data_type="text",
-        prompt_target_identifier=ComponentIdentifier(class_name="test", class_module="test"),
-        attack_identifier=ComponentIdentifier(class_name="test", class_module="test"),
     )
 
 
@@ -64,7 +60,6 @@ def _create_mock_chat_completion(content: str = "hi") -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_openai_chat_target_calls_normalize_async():
     target = OpenAIChatTarget(
@@ -76,7 +71,7 @@ async def test_openai_chat_target_calls_normalize_async():
     user_msg = _make_message(role="user", content="hello")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     target._memory = mock_memory
 
     mock_completion = _create_mock_chat_completion("world")
@@ -92,7 +87,6 @@ async def test_openai_chat_target_calls_normalize_async():
         assert call_messages[0].get_value() == "hello"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_openai_chat_target_sends_normalized_to_construct_request():
     """Verify that the normalized (not original) conversation is used for the API body."""
@@ -106,7 +100,7 @@ async def test_openai_chat_target_sends_normalized_to_construct_request():
     adapted_msg = _make_message(role="user", content="adapted")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     target._memory = mock_memory
 
     mock_completion = _create_mock_chat_completion("response")
@@ -115,7 +109,10 @@ async def test_openai_chat_target_sends_normalized_to_construct_request():
     with (
         patch.object(target.configuration, "normalize_async", new_callable=AsyncMock, return_value=[adapted_msg]),
         patch.object(
-            target, "_construct_request_body", new_callable=AsyncMock, return_value={"model": "gpt-4o", "messages": []}
+            target,
+            "_construct_request_body_async",
+            new_callable=AsyncMock,
+            return_value={"model": "gpt-4o", "messages": []},
         ) as mock_construct,
     ):
         await target.send_prompt_async(message=user_msg)
@@ -126,7 +123,6 @@ async def test_openai_chat_target_sends_normalized_to_construct_request():
         assert call_conv[0].get_value() == "adapted"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_openai_chat_target_memory_not_mutated():
     """Memory-backed conversation must not be altered by normalize_async."""
@@ -157,7 +153,7 @@ async def test_openai_chat_target_memory_not_mutated():
     memory_conversation: MutableSequence[Message] = [system_msg]
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = memory_conversation
+    mock_memory.get_conversation_messages.return_value = memory_conversation
     target._memory = mock_memory
 
     mock_completion = _create_mock_chat_completion("response")
@@ -175,7 +171,6 @@ async def test_openai_chat_target_memory_not_mutated():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_openai_response_target_calls_normalize_async():
     target = OpenAIResponseTarget(
@@ -187,18 +182,28 @@ async def test_openai_response_target_calls_normalize_async():
     user_msg = _make_message(role="user", content="hello")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     target._memory = mock_memory
 
     # Mock the API to return a simple response (no tool calls)
     mock_response = MagicMock()
     mock_response.error = None
     mock_response.status = "completed"
-    mock_response.output = [MagicMock()]
-    mock_response.output[0].type = "message"
-    mock_response.output[0].content = [MagicMock()]
-    mock_response.output[0].content[0].type = "output_text"
-    mock_response.output[0].content[0].text = "world"
+    mock_response.output = [
+        ResponseOutputMessage(
+            id="response-message",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="world",
+                    type="output_text",
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+    ]
     mock_response.model_dump_json.return_value = json.dumps(
         {"output": [{"type": "message", "content": [{"type": "output_text", "text": "world"}]}]}
     )
@@ -218,7 +223,6 @@ async def test_openai_response_target_calls_normalize_async():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_azure_ml_target_calls_normalize_async():
     target = AzureMLChatTarget(
@@ -229,7 +233,7 @@ async def test_azure_ml_target_calls_normalize_async():
     user_msg = _make_message(role="user", content="hello")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     target._memory = mock_memory
 
     with (
@@ -242,7 +246,6 @@ async def test_azure_ml_target_calls_normalize_async():
         mock_normalize.assert_called_once()
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_azure_ml_target_sends_normalized_to_complete_chat():
     """Normalized (not original) messages should be passed to _complete_chat_async."""
@@ -255,7 +258,7 @@ async def test_azure_ml_target_sends_normalized_to_complete_chat():
     adapted_msg = _make_message(role="user", content="adapted")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     target._memory = mock_memory
 
     with (
@@ -269,7 +272,6 @@ async def test_azure_ml_target_sends_normalized_to_complete_chat():
         assert call_messages[0].get_value() == "adapted"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_azure_ml_target_memory_not_mutated():
     """Memory should retain original messages after normalization."""
@@ -298,7 +300,7 @@ async def test_azure_ml_target_memory_not_mutated():
     memory_conversation: MutableSequence[Message] = [system_msg]
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = memory_conversation
+    mock_memory.get_conversation_messages.return_value = memory_conversation
     target._memory = mock_memory
 
     with patch.object(target, "_complete_chat_async", new_callable=AsyncMock, return_value="response"):
@@ -309,61 +311,6 @@ async def test_azure_ml_target_memory_not_mutated():
     assert memory_conversation[0].get_piece().api_role == "system"
 
 
-# ---------------------------------------------------------------------------
-# AzureMLChatTarget — message_normalizer deprecation
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.usefixtures("patch_central_database")
-def test_azure_ml_generic_system_squash_normalizer_emits_deprecation_warning():
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        target = AzureMLChatTarget(
-            endpoint="http://aml-test-endpoint.com",
-            api_key="valid_api_key",
-            message_normalizer=GenericSystemSquashNormalizer(),
-        )
-        deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-        assert len(deprecation_warnings) == 1
-        assert "message_normalizer is deprecated" in str(deprecation_warnings[0].message)
-
-
-@pytest.mark.usefixtures("patch_central_database")
-def test_azure_ml_generic_system_squash_normalizer_creates_adapt_configuration():
-    """Legacy message_normalizer should be translated into a TargetConfiguration with ADAPT policy."""
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        target = AzureMLChatTarget(
-            endpoint="http://aml-test-endpoint.com",
-            api_key="valid_api_key",
-            message_normalizer=GenericSystemSquashNormalizer(),
-        )
-    # The shim should create a config with supports_system_prompt=False
-    assert not target.capabilities.supports_system_prompt
-    assert target.configuration.includes(capability=CapabilityName.MULTI_TURN)
-    assert not target.configuration.includes(capability=CapabilityName.SYSTEM_PROMPT)
-
-
-@pytest.mark.usefixtures("patch_central_database")
-def test_azure_ml_message_normalizer_and_custom_config_raises():
-    """Passing both message_normalizer and custom_configuration should raise ValueError."""
-    custom_config = TargetConfiguration(
-        capabilities=TargetCapabilities(
-            supports_multi_turn=True,
-            supports_system_prompt=True,
-            supports_multi_message_pieces=True,
-        )
-    )
-    with pytest.raises(ValueError, match="Cannot specify both"):
-        AzureMLChatTarget(
-            endpoint="http://aml-test-endpoint.com",
-            api_key="valid_api_key",
-            message_normalizer=GenericSystemSquashNormalizer(),
-            custom_configuration=custom_config,
-        )
-
-
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_azure_ml_system_squash_via_configuration_pipeline():
     """End-to-end: GenericSystemSquashNormalizer-equivalent behavior via TargetConfiguration pipeline."""
@@ -390,7 +337,7 @@ async def test_azure_ml_system_squash_via_configuration_pipeline():
     user_msg = _make_message(role="user", content="hello")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = [system_msg]
+    mock_memory.get_conversation_messages.return_value = [system_msg]
     target._memory = mock_memory
 
     with patch.object(target, "_complete_chat_async", new_callable=AsyncMock, return_value="response") as mock_chat:
@@ -410,7 +357,6 @@ async def test_azure_ml_system_squash_via_configuration_pipeline():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_get_normalized_conversation_fetches_history_and_appends_message():
     """The method should fetch history from memory, append the current message, and return them."""
@@ -424,18 +370,17 @@ async def test_get_normalized_conversation_fetches_history_and_appends_message()
     user_msg = _make_message(role="user", content="new question")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = [history_msg]
+    mock_memory.get_conversation_messages.return_value = [history_msg]
     target._memory = mock_memory
 
     result = await target._get_normalized_conversation_async(message=user_msg)
 
-    mock_memory.get_conversation.assert_called_once_with(conversation_id="conv1")
+    mock_memory.get_conversation_messages.assert_called_once_with(conversation_id="conv1")
     assert len(result) == 2
     assert result[0].get_value() == "previous answer"
     assert result[1].get_value() == "new question"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_get_normalized_conversation_empty_history():
     """When memory has no history, the result should contain only the current message."""
@@ -448,7 +393,7 @@ async def test_get_normalized_conversation_empty_history():
     user_msg = _make_message(role="user", content="hello")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     target._memory = mock_memory
 
     result = await target._get_normalized_conversation_async(message=user_msg)
@@ -457,7 +402,6 @@ async def test_get_normalized_conversation_empty_history():
     assert result[0].get_value() == "hello"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_get_normalized_conversation_does_not_mutate_memory():
     """The original memory-backed list must not be modified by the method."""
@@ -472,7 +416,7 @@ async def test_get_normalized_conversation_does_not_mutate_memory():
 
     memory_list: MutableSequence[Message] = [history_msg]
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = memory_list
+    mock_memory.get_conversation_messages.return_value = memory_list
     target._memory = mock_memory
 
     await target._get_normalized_conversation_async(message=user_msg)
@@ -482,7 +426,6 @@ async def test_get_normalized_conversation_does_not_mutate_memory():
     assert memory_list[0].get_value() == "old"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_get_normalized_conversation_runs_pipeline():
     """The method should invoke the normalization pipeline on the assembled conversation."""
@@ -509,7 +452,7 @@ async def test_get_normalized_conversation_runs_pipeline():
     user_msg = _make_message(role="user", content="hi")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = [system_msg]
+    mock_memory.get_conversation_messages.return_value = [system_msg]
     target._memory = mock_memory
 
     result = await target._get_normalized_conversation_async(message=user_msg)
@@ -522,7 +465,6 @@ async def test_get_normalized_conversation_runs_pipeline():
     assert "system" not in roles
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_get_normalized_conversation_passthrough_when_no_adaptation_needed():
     """When the target supports all capabilities, the pipeline should pass messages through unchanged."""
@@ -536,7 +478,7 @@ async def test_get_normalized_conversation_passthrough_when_no_adaptation_needed
     user_msg = _make_message(role="user", content="hello")
 
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation.return_value = [system_msg]
+    mock_memory.get_conversation_messages.return_value = [system_msg]
     target._memory = mock_memory
 
     result = await target._get_normalized_conversation_async(message=user_msg)

@@ -21,10 +21,8 @@ from pyrit.executor.attack import (
 )
 from pyrit.executor.attack.core import AttackAdversarialConfig, AttackScoringConfig
 from pyrit.executor.attack.multi_turn.tree_of_attacks import TAPAttackScoringConfig
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import Message, MessagePiece, SeedGroup, SeedPrompt
+from pyrit.models import ComponentIdentifier, Message, MessagePiece, SeedGroup, SeedPrompt
 from pyrit.prompt_target import PromptTarget
-from pyrit.prompt_target.common.prompt_chat_target import PromptChatTarget
 from pyrit.score import FloatScaleThresholdScorer, TrueFalseScorer
 
 
@@ -66,7 +64,7 @@ def mock_scorer():
 def mock_memory():
     """Create a mock memory instance"""
     memory = MagicMock()
-    memory.get_conversation.return_value = []
+    memory.get_conversation_messages.return_value = []
     memory.add_message_to_memory = MagicMock()
     return memory
 
@@ -141,7 +139,6 @@ ATTACK_TEST_PARAMS = [
     ATTACK_TEST_PARAMS,
     ids=["PromptSending", "MultiPromptSending", "RedTeaming", "Crescendo", "TreeOfAttacks"],
 )
-@pytest.mark.asyncio
 @patch("pyrit.memory.CentralMemory.get_memory_instance")
 async def test_attack_executor_skips_scoring_on_error(
     mock_memory_instance,
@@ -182,9 +179,9 @@ async def test_attack_executor_skips_scoring_on_error(
 
     # Setup additional configs for multi-turn attacks that need adversarial config
     if attack_class in [RedTeamingAttack, CrescendoAttack, TreeOfAttacksWithPruningAttack]:
-        # TreeOfAttacks requires PromptChatTarget, others can use PromptTarget
+        # TreeOfAttacks requires PromptTarget, others can use PromptTarget
         if attack_class == TreeOfAttacksWithPruningAttack:
-            adversarial_target = MagicMock(spec=PromptChatTarget)
+            adversarial_target = MagicMock(spec=PromptTarget)
         else:
             adversarial_target = MagicMock(spec=PromptTarget)
 

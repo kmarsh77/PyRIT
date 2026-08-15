@@ -32,12 +32,12 @@ export OPENAI_CHAT_MODEL="gpt-4o"
 
 ```python
 from pyrit.setup import initialize_pyrit_async
-from pyrit.setup.initializers import SimpleInitializer
+from pyrit.setup.initializers import ScorerInitializer, TargetInitializer
 
-await initialize_pyrit_async(memory_db_type="InMemory", initializers=[SimpleInitializer()])
+await initialize_pyrit_async(memory_db_type="InMemory", initializers=[TargetInitializer(), ScorerInitializer()])
 ```
 
-This gives you an in-memory database and default converter/scorer config — enough to run most notebooks and examples. Replace the endpoint/key/model for your provider (Azure, Ollama, Groq, etc.).
+This gives you an in-memory database with configured targets and scorers registered for selection by name or tag. Replace the endpoint/key/model for your provider (Azure, Ollama, Groq, HuggingFace, etc.).
 
 ## For Persistent Setup
 
@@ -50,7 +50,7 @@ For anything beyond a quick test — especially `pyrit_scan`, scenarios, and rep
 :link: ./populating_secrets
 **Set Up Your .env File**
 
-Create `~/.pyrit/.env` with your provider credentials. Tabbed examples for OpenAI, Azure, Ollama, Groq, and more.
+Create `~/.pyrit/.env` with your provider credentials. Tabbed examples for OpenAI, Azure, Ollama, Groq, HuggingFace, and more.
 ::::
 
 ::::{card} 📄 Configuration File (Recommended)

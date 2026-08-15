@@ -4,7 +4,7 @@ Install PyRIT directly into your Python environment for full control and easy in
 
 ## Prerequisites
 
-- Python 3.10, 3.11, 3.12, or 3.13 (check with `python --version`)
+- Python 3.10, 3.11, 3.12, 3.13, or 3.14 (check with `python --version`)
 
 ## Install with pip or uv
 
@@ -16,16 +16,6 @@ Or with uv:
 
 ```bash
 uv pip install pyrit
-```
-
-## Install with Conda
-
-If you prefer conda for managing environments:
-
-```bash
-conda create -y -n pyrit python=3.11
-conda activate pyrit
-pip install pyrit
 ```
 
 ## Matching Notebooks to Your Version

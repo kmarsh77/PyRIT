@@ -12,7 +12,7 @@ from openai import BadRequestError, RateLimitError
 from unit.mocks import get_image_message_piece, get_sample_conversations
 
 from pyrit.exceptions import RateLimitException
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import OpenAITTSTarget
 from pyrit.prompt_target.openai.openai_tts_target import TTSResponseFormat
 
@@ -20,7 +20,7 @@ from pyrit.prompt_target.openai.openai_tts_target import TTSResponseFormat
 @pytest.fixture
 def sample_conversations() -> MutableSequence[MessagePiece]:
     conversations = get_sample_conversations()
-    return Message.flatten_to_message_pieces(conversations)
+    return flatten_to_message_pieces(conversations)
 
 
 @pytest.fixture
@@ -57,7 +57,6 @@ def test_tts_initializes_calls_get_required_parameters(patch_central_database):
         mock_get_non_required.assert_any_call(env_var_name=target.api_key_environment_variable, passed_value="keytest")
 
 
-@pytest.mark.asyncio
 async def test_tts_validate_request_length(tts_target: OpenAITTSTarget):
     request = Message(
         message_pieces=[
@@ -73,7 +72,6 @@ async def test_tts_validate_request_length(tts_target: OpenAITTSTarget):
         await tts_target.send_prompt_async(message=request)
 
 
-@pytest.mark.asyncio
 async def test_tts_validate_prompt_type(tts_target: OpenAITTSTarget):
     request = Message(message_pieces=[get_image_message_piece()])
     with pytest.raises(
@@ -84,7 +82,6 @@ async def test_tts_validate_prompt_type(tts_target: OpenAITTSTarget):
         await tts_target.send_prompt_async(message=request)
 
 
-@pytest.mark.asyncio
 async def test_tts_validate_previous_conversations(
     tts_target: OpenAITTSTarget, sample_conversations: MutableSequence[MessagePiece]
 ):
@@ -93,7 +90,7 @@ async def test_tts_validate_previous_conversations(
     prior_message = Message(message_pieces=[message_piece])
 
     mock_memory = MagicMock()
-    mock_memory.get_conversation.return_value = [prior_message]
+    mock_memory.get_conversation_messages.return_value = [prior_message]
     mock_memory.add_message_to_memory = AsyncMock()
 
     tts_target._memory = mock_memory
@@ -111,7 +108,6 @@ async def test_tts_validate_previous_conversations(
 
 
 @pytest.mark.parametrize("response_format", ["mp3", "ogg"])
-@pytest.mark.asyncio
 async def test_tts_send_prompt_file_save_async(
     patch_central_database,
     sample_conversations: MutableSequence[MessagePiece],
@@ -144,7 +140,6 @@ async def test_tts_send_prompt_file_save_async(
 testdata = [(400, "Bad Request", Exception), (429, "Rate Limit Reached", RateLimitException)]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("status_code, error_text, exception_class", testdata)
 async def test_tts_send_prompt_async_exception_adds_to_memory(
     tts_target: OpenAITTSTarget,
@@ -154,7 +149,7 @@ async def test_tts_send_prompt_async_exception_adds_to_memory(
     exception_class: type[BaseException],
 ):
     mock_memory = MagicMock()
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     mock_memory.add_message_to_memory = AsyncMock()
 
     tts_target._memory = mock_memory
@@ -180,7 +175,6 @@ async def test_tts_send_prompt_async_exception_adds_to_memory(
             await tts_target.send_prompt_async(message=request)
 
 
-@pytest.mark.asyncio
 async def test_tts_send_prompt_async_rate_limit_exception_retries(
     tts_target: OpenAITTSTarget, sample_conversations: MutableSequence[MessagePiece]
 ):
@@ -198,7 +192,6 @@ async def test_tts_send_prompt_async_rate_limit_exception_retries(
             await tts_target.send_prompt_async(message=request)
 
 
-@pytest.mark.asyncio
 async def test_tts_send_prompt_with_speed_parameter(
     patch_central_database,
     sample_conversations: MutableSequence[MessagePiece],

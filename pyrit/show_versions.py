@@ -4,7 +4,7 @@
 """
 Utility methods to print system info for debugging.
 
-Adapted from :py:func:`pandas.show_versions` and :py:func:`sklearn.show_versions`.
+Adapted from ``pandas.show_versions`` and ``sklearn.show_versions``.
 """
 
 import platform
@@ -56,7 +56,7 @@ def _get_deps_info() -> dict[str, str | None]:
 
     from pyrit import __version__
 
-    deps_info = {"pyrit": __version__}
+    deps_info: dict[str, str | None] = {"pyrit": __version__}
 
     from importlib.metadata import PackageNotFoundError, version
 
@@ -78,5 +78,5 @@ def show_versions() -> None:
         print(f"{k:>10}: {stat}")
 
     print("\nPython dependencies:")
-    for k, stat in deps_info.items():
-        print(f"{k:>13}: {stat}")
+    for k, stat_or_none in deps_info.items():
+        print(f"{k:>13}: {stat_or_none}")

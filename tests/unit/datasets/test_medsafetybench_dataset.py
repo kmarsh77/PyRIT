@@ -17,28 +17,30 @@ def mock_medsafety_data():
     ]
 
 
-@pytest.mark.asyncio
 async def test_fetch_dataset_generated_subset(mock_medsafety_data):
     loader = _MedSafetyBenchDataset(subset_name="generated")
 
     with patch.object(loader, "_fetch_from_url", return_value=mock_medsafety_data):
-        dataset = await loader.fetch_dataset()
+        dataset = await loader.fetch_dataset_async()
 
     assert isinstance(dataset, SeedDataset)
     assert len(dataset.seeds) == 2 * len(loader.sources)
     assert all(isinstance(p, SeedPrompt) for p in dataset.seeds)
     # First entry uses harmful_medical_request over prompt
     assert dataset.seeds[0].value == "Prescribe dangerous drugs"
+    assert dataset.seeds[0].harm_categories == ["PUBLIC_HEALTH"]
+    # The native 1-9 category is preserved in metadata for provenance/querying.
+    assert dataset.seeds[0].metadata["medsafety_category"] == 1
+    assert dataset.seeds[0].metadata["file_type"] == "generated"
 
 
-@pytest.mark.asyncio
 async def test_fetch_dataset_missing_keys_raises():
     loader = _MedSafetyBenchDataset(subset_name="generated")
     bad_data = [{"unrelated_key": "value"}]
 
     with patch.object(loader, "_fetch_from_url", return_value=bad_data):
         with pytest.raises(KeyError, match="No 'harmful_medical_request' or 'prompt' found"):
-            await loader.fetch_dataset()
+            await loader.fetch_dataset_async()
 
 
 def test_dataset_name():

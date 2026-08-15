@@ -1,4 +1,5 @@
 import { makeStyles, tokens } from '@fluentui/react-components'
+import { mobileTouchTarget } from '../../../styles/touchTargets'
 
 export const useConverterPanelStyles = makeStyles({
   resizeContainer: {
@@ -224,6 +225,9 @@ export const useConverterPanelStyles = makeStyles({
     fontWeight: tokens.fontWeightSemibold as unknown as string,
     padding: 0,
   },
+  touchTarget: {
+    ...mobileTouchTarget,
+  },
   paramBlock: {
     display: 'flex',
     flexDirection: 'column',
@@ -298,5 +302,40 @@ export const useConverterPanelStyles = makeStyles({
     maxWidth: '100%',
     maxHeight: '200px',
     borderRadius: tokens.borderRadiusMedium,
+  },
+  fileChip: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    backgroundColor: tokens.colorNeutralBackground4,
+    borderRadius: tokens.borderRadiusMedium,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+  },
+  fileChipName: {
+    flex: 1,
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontFamily: tokens.fontFamilyMonospace,
+    color: tokens.colorNeutralForeground1,
+  },
+  fileChipOpen: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalXXS,
+    padding: `${tokens.spacingVerticalXXS} ${tokens.spacingHorizontalS}`,
+    borderRadius: tokens.borderRadiusSmall,
+    backgroundColor: tokens.colorBrandBackground,
+    color: tokens.colorNeutralForegroundOnBrand,
+    fontSize: tokens.fontSizeBase200,
+    fontWeight: tokens.fontWeightSemibold as unknown as string,
+    textDecoration: 'none',
+    flexShrink: 0,
+    ':hover': {
+      backgroundColor: tokens.colorBrandBackgroundHover,
+      color: tokens.colorNeutralForegroundOnBrand,
+    },
   },
 })

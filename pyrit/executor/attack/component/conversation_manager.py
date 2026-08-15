@@ -1,29 +1,37 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from __future__ import annotations
+
 import logging
 import uuid
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from pyrit.common.utils import combine_dict
 from pyrit.executor.attack.component.prepended_conversation_config import (
     PrependedConversationConfig,
 )
-from pyrit.identifiers import ComponentIdentifier
 from pyrit.memory import CentralMemory
-from pyrit.message_normalizer import ConversationContextNormalizer
-from pyrit.models import ChatMessageRole, Message, MessagePiece, Score
-from pyrit.prompt_normalizer.prompt_converter_configuration import (
-    PromptConverterConfiguration,
+from pyrit.message_normalizer import ConversationContextNormalizer, GenericSystemSquashNormalizer
+from pyrit.models import (
+    ChatMessageRole,
+    ComponentIdentifier,
+    Conversation,
+    Message,
+    MessagePiece,
+    Score,
 )
 from pyrit.prompt_normalizer.prompt_normalizer import PromptNormalizer
-from pyrit.prompt_target import PromptTarget
-from pyrit.prompt_target.common.prompt_chat_target import PromptChatTarget
+from pyrit.prompt_target import CapabilityName, PromptTarget
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pyrit.executor.attack.core import AttackContext
+    from pyrit.prompt_normalizer.converter_configuration import (
+        ConverterConfiguration,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +48,14 @@ def mark_messages_as_simulated(messages: Sequence[Message]) -> list[Message]:
         messages (Sequence[Message]): The messages to mark as simulated.
 
     Returns:
-        List[Message]: The same messages with assistant roles converted to simulated_assistant.
+        list[Message]: The same messages with assistant roles converted to simulated_assistant.
             Modifies the messages in place and also returns them for convenience.
     """
     result = list(messages)
     for message in result:
         for piece in message.message_pieces:
-            if piece._role == "assistant":
-                piece._role = "simulated_assistant"
+            if piece.role == "assistant":
+                piece.role = "simulated_assistant"
     return result
 
 
@@ -55,9 +63,6 @@ def get_adversarial_chat_messages(
     prepended_conversation: list[Message],
     *,
     adversarial_chat_conversation_id: str,
-    attack_identifier: ComponentIdentifier,
-    adversarial_chat_target_identifier: ComponentIdentifier,
-    labels: Optional[dict[str, str]] = None,
 ) -> list[Message]:
     """
     Transform prepended conversation messages for adversarial chat with swapped roles.
@@ -73,9 +78,6 @@ def get_adversarial_chat_messages(
     Args:
         prepended_conversation: The original conversation messages to transform.
         adversarial_chat_conversation_id: Conversation ID for the adversarial chat.
-        attack_identifier (ComponentIdentifier): Attack identifier to associate with messages.
-        adversarial_chat_target_identifier (ComponentIdentifier): Target identifier for the adversarial chat.
-        labels: Optional labels to associate with the messages.
 
     Returns:
         List of transformed messages with swapped roles and new IDs.
@@ -108,9 +110,6 @@ def get_adversarial_chat_messages(
                 original_value_data_type=piece.original_value_data_type,
                 converted_value_data_type=piece.converted_value_data_type,
                 conversation_id=adversarial_chat_conversation_id,
-                attack_identifier=attack_identifier,
-                prompt_target_identifier=adversarial_chat_target_identifier,
-                labels=labels,
             )
 
             result.append(adversarial_piece.to_message())
@@ -140,7 +139,7 @@ async def build_conversation_context_string_async(messages: list[Message]) -> st
     return await normalizer.normalize_string_async(messages)
 
 
-def get_prepended_turn_count(prepended_conversation: Optional[list[Message]]) -> int:
+def get_prepended_turn_count(prepended_conversation: list[Message] | None) -> int:
     """
     Count the number of turns (assistant responses) in a prepended conversation.
 
@@ -184,20 +183,17 @@ class ConversationManager:
     def __init__(
         self,
         *,
-        attack_identifier: ComponentIdentifier,
-        prompt_normalizer: Optional[PromptNormalizer] = None,
-    ):
+        prompt_normalizer: PromptNormalizer | None = None,
+    ) -> None:
         """
         Initialize the conversation manager.
 
         Args:
-            attack_identifier (ComponentIdentifier): The identifier of the attack this manager belongs to.
             prompt_normalizer: Optional prompt normalizer for converting prompts.
                 If not provided, a default PromptNormalizer instance will be created.
         """
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
         self._memory = CentralMemory.get_memory_instance()
-        self._attack_identifier = attack_identifier
 
     def get_conversation(self, conversation_id: str) -> list[Message]:
         """
@@ -210,12 +206,10 @@ class ConversationManager:
             A list of messages in the conversation, ordered by creation time.
             Returns empty list if no messages exist.
         """
-        conversation = self._memory.get_conversation(conversation_id=conversation_id)
+        conversation = self._memory.get_conversation_messages(conversation_id=conversation_id)
         return list(conversation)
 
-    def get_last_message(
-        self, *, conversation_id: str, role: Optional[ChatMessageRole] = None
-    ) -> Optional[MessagePiece]:
+    def get_last_message(self, *, conversation_id: str, role: ChatMessageRole | None = None) -> MessagePiece | None:
         """
         Retrieve the most recent message from a conversation.
 
@@ -242,37 +236,39 @@ class ConversationManager:
     def set_system_prompt(
         self,
         *,
-        target: PromptChatTarget,
+        target: PromptTarget,
         conversation_id: str,
         system_prompt: str,
-        labels: Optional[dict[str, str]] = None,
     ) -> None:
         """
         Set or update the system prompt for a conversation.
 
         Args:
-            target: The chat target to set the system prompt on.
+            target: The target to set the system prompt on. Must handle the
+                SYSTEM_PROMPT capability (natively or via an ADAPT policy).
             conversation_id: Unique identifier for the conversation.
             system_prompt: The system prompt text.
-            labels: Optional labels to associate with the system prompt.
+
+        Raises:
+            ValueError: If target cannot handle the SYSTEM_PROMPT capability.
         """
+        target.configuration.ensure_can_handle(capability=CapabilityName.SYSTEM_PROMPT)
+
         target.set_system_prompt(
             system_prompt=system_prompt,
             conversation_id=conversation_id,
-            attack_identifier=self._attack_identifier,
-            labels=labels,
         )
 
     async def initialize_context_async(
         self,
         *,
-        context: "AttackContext[Any]",
+        context: AttackContext[Any],
         target: PromptTarget,
         conversation_id: str,
-        request_converters: Optional[list[PromptConverterConfiguration]] = None,
-        prepended_conversation_config: Optional["PrependedConversationConfig"] = None,
-        max_turns: Optional[int] = None,
-        memory_labels: Optional[dict[str, str]] = None,
+        request_converters: list[ConverterConfiguration] | None = None,
+        prepended_conversation_config: PrependedConversationConfig | None = None,
+        max_turns: int | None = None,
+        memory_labels: dict[str, str] | None = None,
     ) -> ConversationState:
         """
         Initialize attack context with prepended conversation and merged labels.
@@ -283,14 +279,13 @@ class ConversationManager:
         3. Updates context.executed_turns for multi-turn attacks
         4. Sets context.next_message if there's an unanswered user message
 
-        For PromptChatTarget:
+        For chat-capable PromptTarget:
             - Adds prepended messages to memory with simulated_assistant role
             - All messages get new UUIDs
 
         For non-chat PromptTarget:
-            - If `config.non_chat_target_behavior="normalize_first_turn"`: normalizes
-              conversation to string and prepends to context.next_message
-            - If `config.non_chat_target_behavior="raise"`: raises ValueError
+            - Normalizes the prepended conversation to a string and prepends it to
+              ``context.next_message`` (using ``config.message_normalizer`` when provided).
 
         Args:
             context: The attack context to initialize.
@@ -306,7 +301,7 @@ class ConversationManager:
 
         Raises:
             ValueError: If conversation_id is empty, or if prepended_conversation
-                requires a PromptChatTarget but target is not one.
+                requires a chat-capable PromptTarget but target is not one.
         """
         if not conversation_id:
             raise ValueError("conversation_id cannot be empty")
@@ -321,8 +316,10 @@ class ConversationManager:
             logger.debug(f"No prepended conversation for context initialization: {conversation_id}")
             return state
 
-        # Handle target type compatibility
-        is_chat_target = isinstance(target, PromptChatTarget)
+        # Targets that don't natively support editable history cannot consume a
+        # prepended multi-message conversation as-is — route them to the
+        # single-string fallback path via capability-based routing.
+        is_chat_target = target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY)
         if not is_chat_target:
             return await self._handle_non_chat_target_async(
                 context=context,
@@ -338,14 +335,15 @@ class ConversationManager:
             request_converters=request_converters,
             prepended_conversation_config=prepended_conversation_config,
             max_turns=max_turns,
+            target_identifier=target.get_identifier(),
         )
 
     async def _handle_non_chat_target_async(
         self,
         *,
-        context: "AttackContext[Any]",
+        context: AttackContext[Any],
         prepended_conversation: list[Message],
-        config: Optional["PrependedConversationConfig"],
+        config: PrependedConversationConfig | None,
     ) -> ConversationState:
         """
         Handle prepended conversation for non-chat targets.
@@ -357,38 +355,41 @@ class ConversationManager:
 
         Returns:
             Empty ConversationState (non-chat targets don't track turns).
-
-        Raises:
-            ValueError: If config requires raising for non-chat targets.
         """
         if config is None:
             config = PrependedConversationConfig()
 
-        if config.non_chat_target_behavior == "raise":
-            raise ValueError(
-                "prepended_conversation requires the objective target to be a PromptChatTarget. "
-                "Non-chat objective targets do not support conversation history. "
-                "Use PrependedConversationConfig with non_chat_target_behavior='normalize_first_turn' "
-                "to normalize the conversation into the first message instead."
-            )
-
-        # Normalize conversation to string
         normalizer = config.get_message_normalizer()
-        normalized_context = await normalizer.normalize_string_async(prepended_conversation)
+        messages_to_normalize = prepended_conversation
+        if isinstance(normalizer, ConversationContextNormalizer):
+            messages_to_normalize = await GenericSystemSquashNormalizer().normalize_async(prepended_conversation)
 
-        # Prepend to next_message if it exists, otherwise create new message
-        if context.next_message is not None:
+        normalized_context = await normalizer.normalize_string_async(messages_to_normalize)
+
+        next_message = context.next_message
+        if next_message is None:
+            next_message = Message.from_prompt(prompt=context.objective, role="user")
+            context.next_message = next_message
+
+        if normalized_context:
             # Find an existing text piece to prepend to
             text_piece = None
-            for piece in context.next_message.message_pieces:
+            for piece in next_message.message_pieces:
                 if piece.original_value_data_type == "text":
                     text_piece = piece
                     break
 
             if text_piece:
                 # Prepend context to the existing text piece
-                text_piece.original_value = f"{normalized_context}\n\n{text_piece.original_value}"
-                text_piece.converted_value = f"{normalized_context}\n\n{text_piece.converted_value}"
+                context_prefix = f"{normalized_context}\n\n"
+                if text_piece.original_value != normalized_context and not text_piece.original_value.startswith(
+                    context_prefix
+                ):
+                    text_piece.original_value = f"{context_prefix}{text_piece.original_value}"
+                if text_piece.converted_value != normalized_context and not text_piece.converted_value.startswith(
+                    context_prefix
+                ):
+                    text_piece.converted_value = f"{context_prefix}{text_piece.converted_value}"
             else:
                 # No text piece found (multimodal message), add a new text piece at the beginning
                 context_piece = MessagePiece(
@@ -400,12 +401,7 @@ class ConversationManager:
                     converted_value_data_type="text",
                 )
                 # Create a new message with the context piece prepended
-                context.next_message = Message(
-                    message_pieces=[context_piece] + list(context.next_message.message_pieces)
-                )
-        else:
-            # Create new message with just the context
-            context.next_message = Message.from_prompt(prompt=normalized_context, role="user")
+                context.next_message = Message(message_pieces=[context_piece] + list(next_message.message_pieces))
 
         logger.debug(f"Normalized prepended conversation for non-chat target: {len(normalized_context)} characters")
         return ConversationState()
@@ -415,9 +411,10 @@ class ConversationManager:
         *,
         prepended_conversation: list[Message],
         conversation_id: str,
-        request_converters: Optional[list[PromptConverterConfiguration]] = None,
-        prepended_conversation_config: Optional["PrependedConversationConfig"] = None,
-        max_turns: Optional[int] = None,
+        request_converters: list[ConverterConfiguration] | None = None,
+        prepended_conversation_config: PrependedConversationConfig | None = None,
+        max_turns: int | None = None,
+        target_identifier: ComponentIdentifier | None = None,
     ) -> int:
         """
         Add prepended conversation messages to memory for a chat target.
@@ -438,6 +435,8 @@ class ConversationManager:
             request_converters: Optional converters to apply to messages.
             prepended_conversation_config: Optional configuration for converter roles.
             max_turns: If provided, validates that turn count doesn't exceed this limit.
+            target_identifier (ComponentIdentifier | None): The target the conversation is held
+                with, if known. Recorded once per conversation.
 
         Returns:
             The number of turns (assistant messages) added.
@@ -450,6 +449,10 @@ class ConversationManager:
         if not valid_messages:
             return 0
 
+        self._memory.add_conversation_to_memory(
+            conversation=Conversation(conversation_id=conversation_id, target_identifier=target_identifier)
+        )
+
         # Get roles that should have converters applied
         apply_to_roles = (
             prepended_conversation_config.apply_converters_to_roles if prepended_conversation_config else None
@@ -458,13 +461,12 @@ class ConversationManager:
         turn_count = 0
 
         for i, message in enumerate(valid_messages):
-            message_copy = message.duplicate_message()
+            message_copy = message.duplicate()
 
             message_copy.set_simulated_role()
 
             for piece in message_copy.message_pieces:
                 piece.conversation_id = conversation_id
-                piece.attack_identifier = self._attack_identifier
 
             # Count turns at message level (only assistant/simulated_assistant messages)
             # A multi-part response still counts as one turn
@@ -493,12 +495,13 @@ class ConversationManager:
     async def _process_prepended_for_chat_target_async(
         self,
         *,
-        context: "AttackContext[Any]",
+        context: AttackContext[Any],
         prepended_conversation: list[Message],
         conversation_id: str,
-        request_converters: Optional[list[PromptConverterConfiguration]],
-        prepended_conversation_config: Optional["PrependedConversationConfig"],
-        max_turns: Optional[int],
+        request_converters: list[ConverterConfiguration] | None,
+        prepended_conversation_config: PrependedConversationConfig | None,
+        max_turns: int | None,
+        target_identifier: ComponentIdentifier | None = None,
     ) -> ConversationState:
         """
         Process prepended conversation for a chat target.
@@ -515,6 +518,8 @@ class ConversationManager:
             request_converters: Converters to apply.
             prepended_conversation_config: Configuration for converter roles.
             max_turns: Maximum turns for validation.
+            target_identifier (ComponentIdentifier | None): The objective target the
+                conversation is held with, if known.
 
         Returns:
             ConversationState with turn_count and scores.
@@ -534,6 +539,7 @@ class ConversationManager:
             request_converters=request_converters,
             prepended_conversation_config=prepended_conversation_config,
             max_turns=max_turns,
+            target_identifier=target_identifier,
         )
 
         # Update context for multi-turn attacks to reflect prepended_conversation
@@ -543,19 +549,24 @@ class ConversationManager:
         if is_multi_turn and final_prepended_message.api_role == "assistant":
             # Update executed_turns
             if hasattr(context, "executed_turns"):
-                context.executed_turns = state.turn_count
+                context.executed_turns = state.turn_count  # type: ignore[ty:invalid-assignment]
 
-            # Extract scores on final prepended assistant message if it exists and are relavent
-            # Multi-part messages (e.g., text + image) may have scores on multiple pieces
-            # only extract true_false scores with score_value=False. This allows attacks
-            # to use the score's rationale for feedback without re-scoring.
-            for piece in final_prepended_message.message_pieces:
-                for score in piece.scores:
-                    if score.score_type == "true_false" and score.get_value() is False:
-                        state.last_assistant_message_scores.append(score)
-                        # context.last_score gets the first matching score for single-score use cases.
-                        if hasattr(context, "last_score") and context.last_score is None:
-                            context.last_score = score
+            # Extract scores on final prepended assistant message if it exists and are relevant.
+            # The prepended pieces were re-keyed with new ids when added to memory, so look
+            # them up by conversation_id and filter to the last assistant turn. Only extract
+            # true_false scores with score_value=False so attacks can use the rationale for
+            # feedback without re-scoring.
+            memory_pieces = self._memory.get_message_pieces(conversation_id=conversation_id)
+            assistant_piece_ids = [str(piece.id) for piece in memory_pieces if piece.api_role == "assistant"]
+            existing_scores = (
+                self._memory.get_prompt_scores(prompt_ids=assistant_piece_ids) if assistant_piece_ids else []
+            )
+            for score in existing_scores:
+                if score.score_type == "true_false" and score.get_value() is False:
+                    state.last_assistant_message_scores.append(score)
+                    # context.last_score gets the first matching score for single-score use cases.
+                    if hasattr(context, "last_score") and context.last_score is None:
+                        context.last_score = score  # type: ignore[ty:invalid-assignment]
 
         return state
 
@@ -563,8 +574,8 @@ class ConversationManager:
         self,
         *,
         message: Message,
-        request_converters: list[PromptConverterConfiguration],
-        apply_to_roles: Optional[list[ChatMessageRole]],
+        request_converters: list[ConverterConfiguration],
+        apply_to_roles: list[ChatMessageRole] | None,
     ) -> None:
         """
         Apply converters to message pieces.
@@ -581,7 +592,7 @@ class ConversationManager:
                 continue
 
             temp_message = Message(message_pieces=[piece])
-            await self._prompt_normalizer.convert_values(
+            await self._prompt_normalizer.convert_values_async(
                 message=temp_message,
                 converter_configurations=request_converters,
             )

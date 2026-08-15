@@ -6,18 +6,17 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
-from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import (
+    ComponentIdentifier,
     Message,
     MessagePiece,
     construct_response_from_request,
 )
 from pyrit.prompt_target.common.prompt_target import PromptTarget
-from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
 
@@ -35,15 +34,15 @@ class HTTPTarget(PromptTarget):
 
     def __init__(
         self,
+        *,
         http_request: str,
         prompt_regex_string: str = "{PROMPT}",
         use_tls: bool = True,
-        callback_function: Optional[Callable[..., Any]] = None,
-        max_requests_per_minute: Optional[int] = None,
-        client: Optional[httpx.AsyncClient] = None,
+        callback_function: Callable[..., Any] | None = None,
+        max_requests_per_minute: int | None = None,
+        client: httpx.AsyncClient | None = None,
         model_name: str = "",
-        custom_configuration: Optional[TargetConfiguration] = None,
-        custom_capabilities: Optional[TargetCapabilities] = None,
+        custom_configuration: TargetConfiguration | None = None,
         **httpx_client_kwargs: Any,
     ) -> None:
         """
@@ -61,8 +60,6 @@ class HTTPTarget(PromptTarget):
             model_name (str): The model name. Defaults to empty string.
             custom_configuration (TargetConfiguration, Optional): Override the default configuration for
                 this target instance. Defaults to None.
-            custom_capabilities (TargetCapabilities, Optional): **Deprecated.** Use
-                ``custom_configuration`` instead. Will be removed in v0.14.0.
             **httpx_client_kwargs: Additional keyword arguments for httpx.AsyncClient.
 
         Raises:
@@ -81,7 +78,6 @@ class HTTPTarget(PromptTarget):
             endpoint=endpoint,
             model_name=model_name,
             custom_configuration=custom_configuration,
-            custom_capabilities=custom_capabilities,
         )
         self.http_request = http_request
         self.callback_function = callback_function
@@ -113,7 +109,7 @@ class HTTPTarget(PromptTarget):
         http_request: str,
         prompt_regex_string: str = "{PROMPT}",
         callback_function: Callable[..., Any] | None = None,
-        max_requests_per_minute: Optional[int] = None,
+        max_requests_per_minute: int | None = None,
     ) -> "HTTPTarget":
         """
         Alternative constructor that accepts a pre-configured httpx client.
@@ -189,23 +185,22 @@ class HTTPTarget(PromptTarget):
             cleanup_client = True
 
         try:
-            match http_body:
-                case dict():
-                    response = await client.request(
-                        method=http_method,
-                        url=url,
-                        headers=header_dict,
-                        data=http_body,
-                        follow_redirects=True,
-                    )
-                case str():
-                    response = await client.request(
-                        method=http_method,
-                        url=url,
-                        headers=header_dict,
-                        content=http_body,
-                        follow_redirects=True,
-                    )
+            if isinstance(http_body, dict):
+                response = await client.request(
+                    method=http_method,
+                    url=url,
+                    headers=header_dict,
+                    data=http_body,
+                    follow_redirects=True,
+                )
+            else:
+                response = await client.request(
+                    method=http_method,
+                    url=url,
+                    headers=header_dict,
+                    content=http_body,
+                    follow_redirects=True,
+                )
 
             response_content = response.content
 

@@ -6,10 +6,6 @@
 #       format_name: percent
 #       format_version: '1.3'
 #       jupytext_version: 1.17.2
-#   kernelspec:
-#     display_name: pyrit-dev
-#     language: python
-#     name: python3
 # ---
 
 # %% [markdown]
@@ -25,7 +21,7 @@
 # %% [markdown]
 # ## Listing Available Instances
 #
-# Use `get_names()` to see registered instances, or `list_metadata()` for details.
+# Use `instances.get_names()` to see registered instances, or `instances.list_metadata()` for details.
 
 # %%
 from pyrit.prompt_target import OpenAIChatTarget
@@ -41,22 +37,22 @@ registry = ScorerRegistry.get_registry_singleton()
 # Register a scorer instance for demonstration
 chat_target = OpenAIChatTarget()
 refusal_scorer = SelfAskRefusalScorer(chat_target=chat_target)
-registry.register_instance(refusal_scorer)
+registry.instances.register(refusal_scorer)
 
 # List what's available
-names = registry.get_names()
+names = registry.instances.get_names()
 print(f"Registered scorers: {names}")
 
 # %% [markdown]
 # ## Getting an Instance
 #
-# Use `get()` to retrieve a pre-configured instance by name. The instance is ready to use immediately.
+# Use `instances.get()` to retrieve a pre-configured instance by name. The instance is ready to use immediately.
 
 # %%
 # Get the first registered scorer
 if names:
     scorer_name = names[0]
-    scorer = registry.get(scorer_name)
+    scorer = registry.instances.get(scorer_name)
     print(f"Retrieved scorer: {scorer}")
     print(f"Scorer type: {type(scorer).__name__}")
 
@@ -66,16 +62,16 @@ if names:
 # Scorer metadata includes the scorer type and identifier for tracking.
 
 # %%
-from pyrit.score import ConsoleScorerPrinter
+from pyrit.output import output_scorer_async
 
 # Get metadata for all registered scorers
-metadata = registry.list_metadata()
+metadata = registry.instances.list_metadata()
 for item in metadata:
     print(f"\n{item.unique_name}:")
     print(f"  Class: {item.class_name}")
     print(f"  Type: {item.params.get('scorer_type', 'unknown')}")
 
-    ConsoleScorerPrinter().print_objective_scorer(scorer_identifier=item)
+    await output_scorer_async(scorer_identifier=item)
 
 # %% [markdown]
 # ## Filtering
@@ -84,15 +80,15 @@ for item in metadata:
 
 # %%
 # Filter by scorer_type (based on isinstance check against TrueFalseScorer/FloatScaleScorer)
-true_false_scorers = registry.list_metadata(include_filters={"scorer_type": "true_false"})
+true_false_scorers = registry.instances.list_metadata(include_filters={"scorer_type": "true_false"})
 print(f"True/False scorers: {[m.unique_name for m in true_false_scorers]}")
 
 # Filter by class_name
-refusal_scorers = registry.list_metadata(include_filters={"class_name": "SelfAskRefusalScorer"})
+refusal_scorers = registry.instances.list_metadata(include_filters={"class_name": "SelfAskRefusalScorer"})
 print(f"Refusal scorers: {[m.unique_name for m in refusal_scorers]}")
 
 # Combine multiple filters (AND logic)
-specific_scorers = registry.list_metadata(
+specific_scorers = registry.instances.list_metadata(
     include_filters={"scorer_type": "true_false", "class_name": "SelfAskRefusalScorer"}
 )
 print(f"True/False refusal scorers: {[m.unique_name for m in specific_scorers]}")
@@ -115,5 +111,5 @@ await initialize_pyrit_async(  # type: ignore
 # Get the registry singleton
 registry = TargetRegistry.get_registry_singleton()
 # List registered targets
-target_names = registry.get_names()
+target_names = registry.instances.get_names()
 print(f"Registered targets after initialization: {target_names}")

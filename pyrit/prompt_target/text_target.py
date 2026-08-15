@@ -1,15 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import csv
-import json
 import sys
-from pathlib import Path
-from typing import IO, Optional
+from typing import IO
 
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message
 from pyrit.prompt_target.common.prompt_target import PromptTarget
-from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
 
@@ -26,8 +22,7 @@ class TextTarget(PromptTarget):
         self,
         *,
         text_stream: IO[str] = sys.stdout,
-        custom_configuration: Optional[TargetConfiguration] = None,
-        custom_capabilities: Optional[TargetCapabilities] = None,
+        custom_configuration: TargetConfiguration | None = None,
     ) -> None:
         """
         Initialize the TextTarget.
@@ -36,10 +31,8 @@ class TextTarget(PromptTarget):
             text_stream (IO[str]): The text stream to write prompts to. Defaults to sys.stdout.
             custom_configuration (TargetConfiguration, Optional): Override the default configuration for
                 this target instance. Defaults to None.
-            custom_capabilities (TargetCapabilities, Optional): **Deprecated.** Use
-                ``custom_configuration`` instead. Will be removed in v0.14.0.
         """
-        super().__init__(custom_configuration=custom_configuration, custom_capabilities=custom_capabilities)
+        super().__init__(custom_configuration=custom_configuration)
         self._text_stream = text_stream
 
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
@@ -61,44 +54,8 @@ class TextTarget(PromptTarget):
 
         return []
 
-    def import_scores_from_csv(self, csv_file_path: Path) -> list[MessagePiece]:
-        """
-        Import message pieces and their scores from a CSV file.
-
-        Args:
-            csv_file_path (Path): The path to the CSV file containing scores.
-
-        Returns:
-            list[MessagePiece]: A list of message pieces imported from the CSV.
-        """
-        message_pieces = []
-
-        with open(csv_file_path, newline="") as csvfile:
-            csvreader = csv.DictReader(csvfile)
-
-            for row in csvreader:
-                sequence_str = row.get("sequence", None)
-                labels_str = row.get("labels", None)
-                labels = json.loads(labels_str) if labels_str else None
-
-                message_piece = MessagePiece(
-                    role=row["role"],  # type: ignore[arg-type]
-                    original_value=row["value"],
-                    original_value_data_type=row.get("data_type", None),  # type: ignore[arg-type]
-                    conversation_id=row.get("conversation_id", None),
-                    sequence=int(sequence_str) if sequence_str else None,
-                    labels=labels,
-                    response_error=row.get("response_error", None),  # type: ignore[arg-type]
-                    prompt_target_identifier=self.get_identifier(),
-                )
-                message_pieces.append(message_piece)
-
-        # This is post validation, so the message_pieces should be okay and normalized
-        self._memory.add_message_pieces_to_memory(message_pieces=message_pieces)
-        return message_pieces
-
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         pass
 
-    async def cleanup_target(self) -> None:
+    async def cleanup_target_async(self) -> None:
         """Target does not require cleanup."""

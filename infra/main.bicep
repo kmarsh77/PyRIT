@@ -3,7 +3,7 @@
 //
 // Deploys the CoPyRIT GUI as an Azure Container App with:
 // - Workload profiles environment with public ingress + optional IP restriction
-// - MSAL PKCE authentication (frontend) + FastAPI JWT middleware (backend)
+// - MSAL PKCE authentication (frontend) + Microsoft Graph-backed auth (backend)
 // - User-assigned managed identity for Azure SQL, ACR, Azure OpenAI, Key Vault
 // - Azure SQL (existing) via managed identity — no passwords
 // - Key Vault for secrets (referenced via ACA secretRef, not embedded)
@@ -50,7 +50,13 @@ param entraClientId string
 
 @description('Object ID of the Entra security group allowed to access the GUI')
 @metadata({ description: 'Find this in Azure Portal → Entra ID → Groups → your group → Object ID' })
+@minLength(1)
 param allowedGroupObjectIds string
+
+var normalizedAllowedGroupObjectIds = filter(
+  map(split(allowedGroupObjectIds, ','), groupId => trim(groupId)),
+  groupId => !empty(groupId)
+)
 
 @description('CIDR range allowed to reach the app (e.g., your corp VPN CIDR). Empty = no IP restriction, all traffic allowed.')
 param allowedCidr string = ''
@@ -68,11 +74,15 @@ param sqlDatabaseName string
 // Note: operator and operation are per-user settings configured in the GUI,
 // not deployment-level config.
 
-@description('PyRIT initializer to run. Default "target airt" registers target configs + attack defaults.')
-param pyritInitializer string = 'target airt'
+@description('PyRIT initializer to run. Default "target" registers target configs.')
+param pyritInitializer string = 'target'
 
 @description('Key Vault secret name containing the .env file contents (all endpoints, models, and API keys). The secret is mounted as an env var and PyRIT parses it at startup.')
 param envSecretName string = 'env-global'
+
+@secure()
+@description('Optional raw .env file contents. If provided, this is used directly instead of reading from Key Vault.')
+param envFileContents string = ''
 
 @description('Container CPU cores')
 param cpuCores string = '1.0'
@@ -138,6 +148,7 @@ var imageUsesLatest = endsWith(containerImage, ':latest')
 var createLogAnalytics = logAnalyticsWorkspaceId == ''
 var createVnet = enablePrivateEndpoint && infrastructureSubnetId == ''
 var createAcr = acrResourceId == '' && acrName == ''
+var useInlineEnvFile = !empty(envFileContents)
 
 // ============================================================================
 // VNet + Subnet (created only if infrastructureSubnetId is not provided)
@@ -406,11 +417,16 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 
       // Key Vault secret reference for the .env file contents
       secrets: [
-        {
-          name: 'env-file'
-          keyVaultUrl: 'https://${keyVaultName}${environment().suffixes.keyvaultDns}/secrets/${envSecretName}'
-          identity: managedIdentity.id
-        }
+        useInlineEnvFile
+          ? {
+              name: 'env-file'
+              value: envFileContents
+            }
+          : {
+              name: 'env-file'
+              keyVaultUrl: 'https://${keyVaultName}${environment().suffixes.keyvaultDns}/secrets/${envSecretName}'
+              identity: managedIdentity.id
+            }
       ]
     }
 
@@ -459,7 +475,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             }
             {
               name: 'ENTRA_ALLOWED_GROUP_IDS'
-              value: allowedGroupObjectIds
+              value: join(normalizedAllowedGroupObjectIds, ',')
             }
             // OTel: point the SDK at the ACA managed agent (localhost sidecar)
             {
@@ -474,6 +490,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'AZURE_CLIENT_ID'
               value: managedIdentity.properties.clientId
+            }
+            // CORS origin for the SPA. The ACA-generated FQDN is deterministic
+            // (<appName>.<envDefaultDomain>), so we compute it from upstream
+            // resources rather than self-referencing containerApp.
+            {
+              name: 'PYRIT_CORS_ORIGINS'
+              value: 'https://${appName}.${acaEnvironment.properties.defaultDomain}'
             }
           ]
         }
@@ -492,8 +515,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 // certificates on app registrations, making Easy Auth's OAuth authorization
 // code flow impossible. Instead, authentication is handled in-app using
 // MSAL with PKCE (public client flow) — no secrets needed.
-// The frontend uses @azure/msal-browser for login; the backend validates
-// JWTs from the Authorization header against Entra JWKS.
+// The frontend uses @azure/msal-browser to acquire a delegated Microsoft Graph
+// token; the backend validates it through trusted Graph endpoints and applies
+// local group-based authorization.
 // ============================================================================
 
 // ============================================================================

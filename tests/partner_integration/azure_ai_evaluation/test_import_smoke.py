@@ -18,7 +18,7 @@ from pyrit.score.true_false.true_false_scorer import TrueFalseScorer
 def _azure_ai_evaluation_available() -> bool:
     """Check if azure-ai-evaluation[redteam] is installed."""
     try:
-        from azure.ai.evaluation.red_team import RedTeam  # noqa: F401
+        from azure.ai.evaluation.red_team import RedTeam  # type: ignore[ty:unresolved-import]  # noqa: F401
 
         return True
     except ImportError:
@@ -37,7 +37,7 @@ class TestRedTeamModuleImports:
 
     def test_redteam_public_api_imports(self):
         """Verify all public classes from azure.ai.evaluation.red_team are importable."""
-        from azure.ai.evaluation.red_team import (
+        from azure.ai.evaluation.red_team import (  # type: ignore[ty:unresolved-import]
             AttackStrategy,
             RedTeam,
             RedTeamResult,
@@ -50,29 +50,6 @@ class TestRedTeamModuleImports:
         assert RiskCategory is not None
         assert RedTeamResult is not None
         assert SupportedLanguages is not None
-
-
-class TestPromptChatTargetTransitionalCompat:
-    """Verify PromptChatTarget still exists and extends PromptTarget.
-
-    The SDK currently imports PromptChatTarget in 6+ production files
-    (_callback_chat_target.py, _orchestrator_manager.py, _scenario_orchestrator.py,
-    _execution_manager.py, strategy_utils.py, _rai_service_target.py). PyRIT is
-    migrating from PromptChatTarget to PromptTarget, but during the transition
-    both must exist with correct inheritance.
-    """
-
-    def test_prompt_chat_target_exists(self):
-        """PromptChatTarget must remain importable during the transition."""
-        from pyrit.prompt_target import PromptChatTarget
-
-        assert PromptChatTarget is not None
-
-    def test_prompt_chat_target_extends_prompt_target(self):
-        """PromptChatTarget must be a subclass of PromptTarget."""
-        from pyrit.prompt_target import PromptChatTarget
-
-        assert issubclass(PromptChatTarget, PromptTarget)
 
 
 @requires_azure_ai_evaluation
@@ -93,7 +70,9 @@ class TestCallbackChatTargetInheritance:
 
     def test_callback_chat_target_extends_prompt_target(self):
         """_CallbackChatTarget must be a subclass of pyrit.prompt_target.PromptTarget."""
-        from azure.ai.evaluation.red_team._callback_chat_target import _CallbackChatTarget
+        from azure.ai.evaluation.red_team._callback_chat_target import (  # type: ignore[ty:unresolved-import]
+            _CallbackChatTarget,
+        )
 
         assert issubclass(_CallbackChatTarget, PromptTarget)
 
@@ -108,6 +87,8 @@ class TestRAIScorerInheritance:
 
     def test_rai_scorer_extends_true_false_scorer(self):
         """RAIServiceScorer must be a subclass of pyrit.score.true_false.TrueFalseScorer."""
-        from azure.ai.evaluation.red_team._foundry._rai_scorer import RAIServiceScorer  # private: intentional
+        from azure.ai.evaluation.red_team._foundry._rai_scorer import (  # type: ignore[ty:unresolved-import]
+            RAIServiceScorer,  # private: intentional
+        )
 
         assert issubclass(RAIServiceScorer, TrueFalseScorer)

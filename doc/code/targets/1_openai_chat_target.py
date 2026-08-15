@@ -5,27 +5,23 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
-#   kernelspec:
-#     display_name: Python 3 (ipykernel)
-#     language: python
-#     name: python3
+#       jupytext_version: 1.19.4
 # ---
 
 # %% [markdown]
-# # 1. OpenAI Chat Target
+# # OpenAI Chat Target
 #
 # In this demo, we show an example of the `OpenAIChatTarget`, which includes many openAI-compatible models including `gpt-4o`, `gpt-4`, `DeepSeek`, `llama`, `phi-4`, and `gpt-3.5`. Internally, this is one of our most-used chat targets for our own infrastructure.
 #
 # For this example, we will use the Jailbreak `SeedPrompt`. Although you can interact with the target directly using `Message` objects, it is almost always better to use an attack. The simplest attack is the `PromptSendingAttack`, which provides parallelization, access to converters and scoring, simpler calling methods, and error resiliency.
 #
-
 # %%
 import os
 
 from pyrit.auth import get_azure_openai_auth
 from pyrit.datasets import TextJailBreak
-from pyrit.executor.attack import ConsoleAttackResultPrinter, PromptSendingAttack
+from pyrit.executor.attack import PromptSendingAttack
+from pyrit.output import output_attack_async
 from pyrit.prompt_target import OpenAIChatTarget
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
@@ -46,7 +42,7 @@ target = OpenAIChatTarget(
 attack = PromptSendingAttack(objective_target=target)
 
 result = await attack.execute_async(objective=jailbreak_prompt)  # type: ignore
-await ConsoleAttackResultPrinter().print_conversation_async(result=result)  # type: ignore
+await output_attack_async(result)
 
 # %% [markdown]
 # ## JSON Output
@@ -120,11 +116,10 @@ from pathlib import Path
 from pyrit.auth import get_azure_openai_auth
 from pyrit.executor.attack import (
     AttackScoringConfig,
-    ConsoleAttackResultPrinter,
     PromptSendingAttack,
 )
 from pyrit.models import SeedGroup, SeedPrompt
-from pyrit.prompt_target import OpenAIChatTarget, TargetCapabilities, TargetConfiguration
+from pyrit.prompt_target import OpenAIChatTarget
 from pyrit.score import SelfAskTrueFalseScorer, TrueFalseQuestion
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
@@ -136,36 +131,14 @@ api_key = get_azure_openai_auth(endpoint)
 chat_target = OpenAIChatTarget(
     endpoint=endpoint,
     api_key=api_key,
-    # Override default (text-only) configuration to enable image input, multi-turn, and JSON output for this multi-modal example.
-    custom_configuration=TargetConfiguration(
-        capabilities=TargetCapabilities(
-            supports_multi_turn=True,
-            supports_json_output=True,
-            supports_multi_message_pieces=True,
-            input_modalities=frozenset(
-                {frozenset({"text", "image_path"}), frozenset({"image_path"}), frozenset({"text"})}
-            ),
-        )
-    ),
 )
 
-scorer = SelfAskTrueFalseScorer(
+scorer = SelfAskTrueFalseScorer.from_question(
     chat_target=OpenAIChatTarget(
         endpoint=endpoint,
         api_key=api_key,
-        # The scorer also needs to read image responses; override configuration to support image input modalities.
-        custom_configuration=TargetConfiguration(
-            capabilities=TargetCapabilities(
-                supports_multi_turn=True,
-                supports_json_output=True,
-                supports_multi_message_pieces=True,
-                input_modalities=frozenset(
-                    {frozenset({"text", "image_path"}), frozenset({"image_path"}), frozenset({"text"})}
-                ),
-            )
-        ),
     ),
-    true_false_question=TrueFalseQuestion(
+    question=TrueFalseQuestion(
         true_description="The response describes the picture as an overview of PyRIT components."
     ),
 )
@@ -199,12 +172,12 @@ result = await attack.execute_async(
     next_message=seed.next_message,
 )  # type: ignore
 
-await ConsoleAttackResultPrinter().print_conversation_async(result=result)  # type: ignore
+await output_attack_async(result)
 
 # %% [markdown]
 # ## OpenAI Configuration
 #
-# All `OpenAITarget`s can communicate to [Azure OpenAI (AOAI)](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference), [OpenAI](https://platform.openai.com/docs/api-reference/introduction), or other compatible endpoints (e.g., Ollama, Groq).
+# All `OpenAITarget`s can communicate to [Azure OpenAI (AOAI)](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference), [OpenAI](https://platform.openai.com/docs/api-reference/introduction), or other compatible endpoints (e.g., Ollama, Groq, HuggingFace).
 #
 # The `OpenAIChatTarget` is built to be as cross-compatible as we can make it, while still being as flexible as we can make it by exposing functionality via parameters.
 #

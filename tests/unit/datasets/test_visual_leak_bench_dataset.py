@@ -49,7 +49,6 @@ class TestVisualLeakBenchDataset:
         dataset = _VisualLeakBenchDataset()
         assert dataset.categories is None
         assert dataset.pii_types is None
-        assert dataset.max_examples is None
 
     def test_init_with_categories(self):
         """Test initialization with category filtering."""
@@ -67,6 +66,11 @@ class TestVisualLeakBenchDataset:
         with pytest.raises(ValueError, match="Expected VisualLeakBenchCategory"):
             _VisualLeakBenchDataset(categories=["PII Leakage"])
 
+    def test_init_with_empty_categories_raises(self):
+        """Test that an empty categories list raises ValueError."""
+        with pytest.raises(ValueError, match="`categories` must be a non-empty list"):
+            _VisualLeakBenchDataset(categories=[])
+
     def test_init_with_pii_types(self):
         """Test initialization with PII type filtering."""
         pii_types = [VisualLeakBenchPIIType.EMAIL, VisualLeakBenchPIIType.SSN]
@@ -83,12 +87,11 @@ class TestVisualLeakBenchDataset:
         with pytest.raises(ValueError, match="Expected VisualLeakBenchPIIType"):
             _VisualLeakBenchDataset(pii_types=["Email"])
 
-    def test_init_with_max_examples(self):
-        """Test initialization with max_examples."""
-        dataset = _VisualLeakBenchDataset(max_examples=10)
-        assert dataset.max_examples == 10
+    def test_init_with_empty_pii_types_raises(self):
+        """Test that an empty pii_types list raises ValueError."""
+        with pytest.raises(ValueError, match="`pii_types` must be a non-empty list"):
+            _VisualLeakBenchDataset(pii_types=[])
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_ocr_creates_pair(self):
         """Test that OCR Injection example creates an image+text pair."""
         mock_data = [_make_ocr_example()]
@@ -98,7 +101,7 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/ocr.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         assert isinstance(dataset, SeedDataset)
         assert len(dataset.seeds) == 2
@@ -108,11 +111,10 @@ class TestVisualLeakBenchDataset:
 
         assert image_prompt.prompt_group_id == text_prompt.prompt_group_id
         assert image_prompt.sequence == 0
-        assert text_prompt.sequence == 1
+        assert text_prompt.sequence == 0
         assert text_prompt.value == _VisualLeakBenchDataset.OCR_INJECTION_PROMPT
         assert image_prompt.value == "/fake/ocr.png"
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_pii_creates_pair(self):
         """Test that PII Leakage example creates an image+text pair with the PII prompt."""
         mock_data = [_make_pii_example()]
@@ -122,13 +124,12 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/pii.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         assert len(dataset.seeds) == 2
         text_prompt = next(s for s in dataset.seeds if s.data_type == "text")
         assert text_prompt.value == _VisualLeakBenchDataset.PII_LEAKAGE_PROMPT
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_harm_categories_ocr(self):
         """Test that OCR Injection examples have correct harm categories."""
         mock_data = [_make_ocr_example()]
@@ -138,12 +139,11 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         for seed in dataset.seeds:
-            assert seed.harm_categories == ["ocr_injection"]
+            assert seed.harm_categories == []
 
-    @pytest.mark.asyncio
     async def test_fetch_dataset_harm_categories_pii(self):
         """Test that PII Leakage examples include pii_leakage and the specific PII type."""
         mock_data = [_make_pii_example(pii_type="SSN")]
@@ -153,13 +153,11 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         for seed in dataset.seeds:
-            assert "pii_leakage" in seed.harm_categories
-            assert "ssn" in seed.harm_categories
+            assert seed.harm_categories == ["PPI"]
 
-    @pytest.mark.asyncio
     async def test_category_filter_ocr_only(self):
         """Test filtering to OCR Injection only excludes PII examples."""
         mock_data = [_make_ocr_example(), _make_pii_example()]
@@ -169,13 +167,12 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         assert len(dataset.seeds) == 2
         for seed in dataset.seeds:
-            assert seed.harm_categories == ["ocr_injection"]
+            assert seed.harm_categories == []
 
-    @pytest.mark.asyncio
     async def test_category_filter_pii_only(self):
         """Test filtering to PII Leakage only excludes OCR examples."""
         mock_data = [_make_ocr_example(), _make_pii_example()]
@@ -185,13 +182,12 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         assert len(dataset.seeds) == 2
         for seed in dataset.seeds:
-            assert "pii_leakage" in seed.harm_categories
+            assert seed.harm_categories == ["PPI"]
 
-    @pytest.mark.asyncio
     async def test_pii_type_filter(self):
         """Test that pii_types filter excludes non-matching PII examples."""
         mock_data = [
@@ -204,13 +200,12 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         assert len(dataset.seeds) == 2
         for seed in dataset.seeds:
-            assert "email" in seed.harm_categories
+            assert seed.harm_categories == ["PPI"]
 
-    @pytest.mark.asyncio
     async def test_pii_type_filter_does_not_affect_ocr(self):
         """Test that pii_types filter does not exclude OCR Injection examples."""
         mock_data = [_make_ocr_example(), _make_pii_example(pii_type="SSN")]
@@ -220,33 +215,13 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         # OCR example passes through; SSN PII example is filtered out
         assert len(dataset.seeds) == 2
         categories = [seed.harm_categories for seed in dataset.seeds]
-        assert any("ocr_injection" in cats for cats in categories)
+        assert all(cats == [] for cats in categories)
 
-    @pytest.mark.asyncio
-    async def test_max_examples_limits_output(self):
-        """Test that max_examples limits the number of examples returned."""
-        mock_data = [
-            _make_ocr_example(filename="ocr_v2_0000.png"),
-            _make_ocr_example(filename="ocr_v2_0001.png"),
-            _make_ocr_example(filename="ocr_v2_0002.png"),
-        ]
-        loader = _VisualLeakBenchDataset(max_examples=2)
-
-        with (
-            patch.object(loader, "_fetch_from_url", return_value=mock_data),
-            patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
-        ):
-            dataset = await loader.fetch_dataset(cache=False)
-
-        # max_examples=2 → at most 4 prompts (2 pairs)
-        assert len(dataset.seeds) <= 4
-
-    @pytest.mark.asyncio
     async def test_all_images_fail_produces_empty_dataset(self):
         """Test that when all image downloads fail, no prompts are produced and SeedDataset raises."""
         mock_data = [_make_ocr_example()]
@@ -258,9 +233,8 @@ class TestVisualLeakBenchDataset:
         ):
             # SeedDataset raises because the loader produces zero prompts
             with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
-                await loader.fetch_dataset(cache=False)
+                await loader.fetch_dataset_async(cache=False)
 
-    @pytest.mark.asyncio
     async def test_failed_image_skipped_but_others_succeed(self):
         """Test that a failed image is skipped while other examples continue."""
         mock_data = [
@@ -281,12 +255,11 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", side_effect=fail_first_call),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         # Only the second example (which succeeded) should be in the dataset
         assert len(dataset.seeds) == 2
 
-    @pytest.mark.asyncio
     async def test_missing_required_key_raises(self):
         """Test that a missing required key in data raises ValueError."""
         mock_data = [{"filename": "ocr_v2_0000.png", "category": "OCR Injection"}]  # missing 'target'
@@ -294,9 +267,8 @@ class TestVisualLeakBenchDataset:
 
         with patch.object(loader, "_fetch_from_url", return_value=mock_data):
             with pytest.raises(ValueError, match="Missing keys in example"):
-                await loader.fetch_dataset(cache=False)
+                await loader.fetch_dataset_async(cache=False)
 
-    @pytest.mark.asyncio
     async def test_prompts_share_group_id_and_dataset_name(self):
         """Test that both prompts in a pair share group_id and dataset_name."""
         mock_data = [_make_ocr_example()]
@@ -306,7 +278,7 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         assert len(dataset.seeds) == 2
         image_p = next(s for s in dataset.seeds if s.data_type == "image_path")
@@ -316,7 +288,6 @@ class TestVisualLeakBenchDataset:
         assert image_p.dataset_name == "visual_leak_bench"
         assert text_p.dataset_name == "visual_leak_bench"
 
-    @pytest.mark.asyncio
     async def test_metadata_stored_on_prompts(self):
         """Test that relevant metadata is stored on both prompts."""
         mock_data = [_make_pii_example(pii_type="Email", target="user@example.com")]
@@ -326,7 +297,7 @@ class TestVisualLeakBenchDataset:
             patch.object(loader, "_fetch_from_url", return_value=mock_data),
             patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
         ):
-            dataset = await loader.fetch_dataset(cache=False)
+            dataset = await loader.fetch_dataset_async(cache=False)
 
         for seed in dataset.seeds:
             assert seed.metadata["category"] == "PII Leakage"
@@ -337,14 +308,13 @@ class TestVisualLeakBenchDataset:
         """Test _build_harm_categories for OCR Injection."""
         loader = _VisualLeakBenchDataset()
         result = loader._build_harm_categories("OCR Injection", "")
-        assert result == ["ocr_injection"]
+        assert result == []
 
     def test_build_harm_categories_pii_with_type(self):
         """Test _build_harm_categories for PII Leakage with specific PII type."""
         loader = _VisualLeakBenchDataset()
         result = loader._build_harm_categories("PII Leakage", "API Key")
-        assert "pii_leakage" in result
-        assert "api_key" in result
+        assert result == ["api_key"]
 
     def test_build_harm_categories_pii_without_type(self):
         """Test _build_harm_categories for PII Leakage without PII type."""
@@ -361,3 +331,31 @@ class TestVisualLeakBenchDataset:
         """Test _get_query_prompt returns PII prompt for PII Leakage category."""
         loader = _VisualLeakBenchDataset()
         assert loader._get_query_prompt("PII Leakage") == _VisualLeakBenchDataset.PII_LEAKAGE_PROMPT
+
+
+async def test_fetch_and_save_image_returns_cached_path():
+    """Test that _fetch_and_save_image_async returns cached path when image already exists."""
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_serializer = MagicMock()
+    mock_memory = MagicMock()
+    mock_memory.results_path = "/results"
+    mock_storage_io = AsyncMock()
+    mock_storage_io.path_exists_async = AsyncMock(return_value=True)
+    mock_memory.results_storage_io = mock_storage_io
+    mock_serializer._memory = mock_memory
+    mock_serializer.data_sub_directory = "/images"
+
+    with patch(
+        "pyrit.datasets.seed_datasets.remote._image_cache.data_serializer_factory",
+        return_value=mock_serializer,
+    ):
+        loader = _VisualLeakBenchDataset()
+        result = await loader._fetch_and_save_image_async(
+            image_url="https://example.com/img.png", example_id="test_001"
+        )
+
+    expected_path = str(Path("/results") / "images" / "visual_leak_bench_test_001.png")
+    assert result == expected_path
+    assert mock_serializer.value == expected_path

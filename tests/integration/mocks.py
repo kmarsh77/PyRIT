@@ -2,14 +2,12 @@
 # Licensed under the MIT license.
 
 from collections.abc import Generator
-from typing import Optional
 
 from sqlalchemy import inspect
 
-from pyrit.identifiers import ComponentIdentifier
 from pyrit.memory import MemoryInterface, SQLiteMemory
-from pyrit.models import Message, MessagePiece
-from pyrit.prompt_target import PromptChatTarget, limit_requests_per_minute
+from pyrit.models import ComponentIdentifier, Message, MessagePiece
+from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration, limit_requests_per_minute
 
 
 def get_memory_interface() -> Generator[MemoryInterface, None, None]:
@@ -36,12 +34,21 @@ def get_sqlite_memory() -> Generator[SQLiteMemory, None, None]:
     sqlite_memory.dispose_engine()
 
 
-class MockPromptTarget(PromptChatTarget):
+class MockPromptTarget(PromptTarget):
+    _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=True,
+            supports_multi_message_pieces=True,
+            supports_system_prompt=True,
+            supports_editable_history=True,
+        )
+    )
+
     prompt_sent: list[str]
 
-    def __init__(self, id=None, rpm=None) -> None:  # noqa: A002
+    def __init__(self, *, id=None, rpm=None) -> None:  # noqa: A002
         super().__init__(max_requests_per_minute=rpm)
-        self.id = id  # noqa: A003
+        self.id = id
         self.prompt_sent = []
 
     def set_system_prompt(
@@ -49,8 +56,8 @@ class MockPromptTarget(PromptChatTarget):
         *,
         system_prompt: str,
         conversation_id: str,
-        attack_identifier: Optional[ComponentIdentifier] = None,
-        labels: Optional[dict[str, str]] = None,
+        attack_identifier: ComponentIdentifier | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         self.system_prompt = system_prompt
         if self._memory:
@@ -60,8 +67,6 @@ class MockPromptTarget(PromptChatTarget):
                     original_value=system_prompt,
                     converted_value=system_prompt,
                     conversation_id=conversation_id,
-                    attack_identifier=attack_identifier,
-                    labels=labels,
                 ).to_message()
             )
 
@@ -75,8 +80,6 @@ class MockPromptTarget(PromptChatTarget):
                 role="assistant",
                 original_value="default",
                 conversation_id=message.message_pieces[0].conversation_id,
-                attack_identifier=message.message_pieces[0].attack_identifier,
-                labels=message.message_pieces[0].labels,
             ).to_message()
         ]
 

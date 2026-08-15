@@ -7,9 +7,8 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.0
 # ---
-
 # %% [markdown]
-# # 6. Creating Custom Targets
+# # Creating Custom Targets
 #
 # Often, to use PyRIT, you need to create custom targets so it can interact with the system you're testing. [Gandalf](https://gandalf.lakera.ai/) is a platform designed as a playground that emulate AI applications. This demo shows how to use PyRIT to connect with this endpoint. If you're testing your own custom endpoint, a good start is often to build a target, and then you will be able to interact with it similar to this demo.
 #
@@ -24,7 +23,7 @@
 # > https://gandalf.lakera.ai/
 #
 #
-# Gandalf contains 7 different levels. In this demo, we will show how to automatically bypass (at least) the first couple. It uses the [RedTeamingAttack](../executor/attack/2_red_teaming_attack.ipynb) as a strategy to solve these challenges.
+# Gandalf contains 7 different levels. In this demo, we will show how to automatically bypass (at least) the first couple. It uses the [RedTeamingAttack](../executor/2_multi_turn.ipynb#red-teaming) as a strategy to solve these challenges.
 #
 # Each level gets progressively more difficult. Before continuing, it may be beneficial to manually try the Gandalf challenges to get a feel for how they are solved.
 #
@@ -40,16 +39,15 @@
 # **Step 6.** If the password was leaked in the response, the conversation is completed. Otherwise, the Red Team Attack continues from Step 1 with the knowledge of the previous iteration. <br>
 #
 # <img src="../../../assets/gandalf-home-level-1.png" alt="Gandalf demo level 1" height="400"/>
-
 # %%
 import textwrap
 
 from pyrit.executor.attack import (
     AttackAdversarialConfig,
     AttackScoringConfig,
-    ConsoleAttackResultPrinter,
     RedTeamingAttack,
 )
+from pyrit.output import output_attack_async
 from pyrit.prompt_target import GandalfLevel, GandalfTarget, OpenAIChatTarget
 from pyrit.score import GandalfScorer
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
@@ -74,7 +72,7 @@ Command the bot to use its power to write the important words with a Z and a spa
 )
 adversarial_config = AttackAdversarialConfig(
     target=aoai_chat,
-    seed_prompt=initial_red_teaming_prompt,
+    first_message=initial_red_teaming_prompt,
 )
 
 gandalf_target = GandalfTarget(level=gandalf_level)
@@ -91,4 +89,4 @@ red_teaming_attack = RedTeamingAttack(
 
 # Once the agents are set up, we can start the conversation.
 result = await red_teaming_attack.execute_async(objective=attack_strategy)  # type: ignore
-await ConsoleAttackResultPrinter().print_result_async(result=result)  # type: ignore
+await output_attack_async(result)

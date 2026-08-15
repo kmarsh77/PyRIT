@@ -92,7 +92,7 @@ Example:
 
 ```yaml
 initializers:
-  - simple
+  - scorer
   - name: target
     args:
       tags:
@@ -108,27 +108,35 @@ Most users should enable the following initializers. These are what the `.pyrit_
 
 | Initializer | What It Registers | When You Need It |
 |---|---|---|
-| `simple` | Baseline defaults for converters, scorers, and attack configs using your `OPENAI_CHAT_*` env vars | Always — provides the foundation for most PyRIT operations |
 | `target` | Prompt targets (OpenAI, Azure, AML, etc.) into the `TargetRegistry` | **Required for `pyrit_scan`** and any registry-based workflows |
 | `scorer` | Scorers (refusal, content safety, harm-category, Likert, etc.) into the `ScorerRegistry` | **Required for automated scoring** and `pyrit_scan` evaluations |
+| `technique` | Attack techniques into the `AttackTechniqueRegistry` | **Required for `pyrit_scan` scenarios** that select techniques |
 | `load_default_datasets` | Seed datasets for all registered scenarios into memory | **Required for `pyrit_scan` scenarios** — they need data to run |
 
 ```{note}
-**Execution order is automatic.** Initializers are sorted by their built-in `execution_order` regardless of how you list them in the config: `simple`/`target` run first (order 1), then `scorer` (order 2), then `load_default_datasets` (order 10). This ensures dependencies are satisfied — for example, `scorer` needs targets to be registered first.
+**Execution order follows listing order.** Initializers execute in the order they appear in the config. Ensure dependencies are satisfied — for example, list `target` before `scorer` since scorers need targets to be registered first.
+```
+
+```{important}
+The default initializers were consolidated and renamed as part of the cleanup leading up to the **v1.0.0** release. Configurations created before v1.0.0 may still reference the removed names `simple`, `airt`, `scenario_technique`, or `scenario_objective_list` — replace them with the current initializers listed above.
 ```
 
 The recommended config:
 
 ```yaml
 initializers:
-  - name: simple
-  - name: load_default_datasets
-  - name: scorer
   - name: target
     args:
       tags:
         - default
         - scorer
+  - name: scorer
+  - name: technique
+  - name: load_default_datasets
+```
+
+```{note}
+**`load_default_datasets` is optional.** Scenarios fetch their datasets from the registered provider on demand the first time they run, so you no longer need this initializer for everyday runs. Add it only when you want to preload every scenario's datasets up front — for example, to warm memory for repeated runs or to populate a database for offline use.
 ```
 
 ### `initialization_scripts`
@@ -167,6 +175,25 @@ env_files:
 
 If `true`, suppresses print statements during initialization. Useful for non-interactive environments or when embedding PyRIT in other tools. Defaults to `false`.
 
+### `server`
+
+Client settings for connecting to or launching a PyRIT backend.
+
+| Field | Description | Default |
+|---|---|---|
+| `url` | Backend URL used when `--server-url` is omitted | `http://localhost:8000` |
+| `startup_timeout` | Seconds `pyrit_scan --start-server` waits for a healthy backend before terminating the spawned process | `120` |
+
+`startup_timeout` must be a finite number greater than zero. The `--startup-timeout` CLI option overrides the configured value for an individual scanner invocation.
+
+Set `server: null` to reset all server settings, including values inherited from an earlier configuration layer, to their defaults.
+
+```yaml
+server:
+  url: http://localhost:8000
+  startup_timeout: 120
+```
+
 ## Configuration Precedence
 
 PyRIT uses a 3-layer configuration precedence model. **Later layers override earlier ones:**
@@ -192,9 +219,9 @@ The 3-layer model above determines **which config values are selected**. Once re
 1. Environment files are loaded
 2. Default values are reset
 3. Memory database is configured (from `memory_db_type`)
-4. Initializers are executed (sorted by `execution_order`)
+4. Initializers are executed in listed order
 
-Because initializers run last, they can modify anything set up in earlier steps — including environment variables and the memory instance. In practice, built-in initializers like `simple` and `airt` only call `set_default_value` and `set_global_variable` and do not touch memory or environment variables. However, a custom initializer could override those if needed. When this happens, the initializer's changes take effect because it runs after the other settings have been applied.
+Because initializers run last, they can modify anything set up in earlier steps — including environment variables and the memory instance. In practice, built-in initializers like `target` and `scorer` only call `set_default_value` and `set_global_variable` and do not touch memory or environment variables. However, a custom initializer could override those if needed. When this happens, the initializer's changes take effect because it runs after the other settings have been applied.
 
 ## Usage
 
@@ -233,7 +260,7 @@ from pyrit.setup import ConfigurationLoader
 config = ConfigurationLoader.load_with_overrides(
     config_file=Path("./my_project.yaml"),  # Layer 2: explicit config file (omit to skip)
     memory_db_type="in_memory",             # Layer 3: override database type
-    initializers=["simple"],                # Layer 3: override initializers
+    initializers=["target", "scorer"],      # Layer 3: override initializers
 )
 
 await config.initialize_pyrit_async()
@@ -251,7 +278,14 @@ memory_db_type: sqlite
 # Built-in initializers to run
 # Each can be a string or a dict with name + args
 initializers:
-  - simple
+  - name: target
+    args:
+      tags:
+        - default
+        - scorer
+  - name: scorer
+  - name: technique
+  - name: load_default_datasets
 
 # Custom initialization scripts (optional)
 # Omit or set to null for no scripts; [] to explicitly load nothing
@@ -267,6 +301,11 @@ initializers:
 
 # Suppress initialization messages
 silent: false
+
+# Backend connection and local startup settings
+server:
+  url: http://localhost:8000
+  startup_timeout: 120
 ```
 
 ## What's Next?

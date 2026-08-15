@@ -13,8 +13,9 @@ from pyrit.prompt_target import (
     OpenAIVideoTarget,
 )
 
+_AZURE_KEY_AUTH_DISABLED_REASON = "Azure key-based (local) auth is disabled in our tenant."
 
-@pytest.mark.asyncio
+
 @pytest.mark.parametrize(
     ("endpoint", "api_key", "model_name"),
     [
@@ -25,6 +26,7 @@ from pyrit.prompt_target import (
         ),
     ],
 )
+@pytest.mark.skip(reason=_AZURE_KEY_AUTH_DISABLED_REASON)
 async def test_azure_content_filters(sqlite_instance, endpoint, api_key, model_name):
     args = {
         "endpoint": os.getenv(endpoint),
@@ -43,7 +45,7 @@ async def test_azure_content_filters(sqlite_instance, endpoint, api_key, model_n
     attack = PromptSendingAttack(objective_target=target)
     result = await attack.execute_async(objective=prompt)
     assert result is not None
-    conversation = sqlite_instance.get_conversation(conversation_id=result.conversation_id)
+    conversation = sqlite_instance.get_conversation_messages(conversation_id=result.conversation_id)
     assert len(conversation) == 2
     response = conversation[-1]
     assert len(response.message_pieces) == 1
@@ -53,7 +55,6 @@ async def test_azure_content_filters(sqlite_instance, endpoint, api_key, model_n
     assert response_piece.response_error == "blocked"
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("endpoint", "api_key", "model_name"),
     [
@@ -64,6 +65,7 @@ async def test_azure_content_filters(sqlite_instance, endpoint, api_key, model_n
         ),
     ],
 )
+@pytest.mark.skip(reason=_AZURE_KEY_AUTH_DISABLED_REASON)
 async def test_azure_content_filters_response_api(sqlite_instance, endpoint, api_key, model_name):
     endpoint_val = os.getenv(endpoint)
     api_key_val = os.getenv(api_key)
@@ -84,7 +86,7 @@ async def test_azure_content_filters_response_api(sqlite_instance, endpoint, api
     attack = PromptSendingAttack(objective_target=target)
     result = await attack.execute_async(objective=prompt)
     assert result is not None
-    conversation = sqlite_instance.get_conversation(conversation_id=result.conversation_id)
+    conversation = sqlite_instance.get_conversation_messages(conversation_id=result.conversation_id)
     assert len(conversation) == 2
     response = conversation[-1]
     assert len(response.message_pieces) == 1
@@ -93,11 +95,11 @@ async def test_azure_content_filters_response_api(sqlite_instance, endpoint, api
     assert response_piece.response_error == "blocked"
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("endpoint", "api_key", "model_name"),
     [("OPENAI_IMAGE_STRICT_FILTER_ENDPOINT", "OPENAI_IMAGE_STRICT_FILTER_KEY", "OPENAI_IMAGE_STRICT_FILTER_MODEL")],
 )
+@pytest.mark.skip(reason=_AZURE_KEY_AUTH_DISABLED_REASON)
 async def test_image_input_filters(sqlite_instance, endpoint, api_key, model_name):
     target = OpenAIImageTarget(
         endpoint=os.getenv(endpoint), api_key=os.getenv(api_key), model_name=os.getenv(model_name)
@@ -109,7 +111,7 @@ async def test_image_input_filters(sqlite_instance, endpoint, api_key, model_nam
     attack = PromptSendingAttack(objective_target=target)
     result = await attack.execute_async(objective=prompt)
     assert result is not None
-    conversation = sqlite_instance.get_conversation(conversation_id=result.conversation_id)
+    conversation = sqlite_instance.get_conversation_messages(conversation_id=result.conversation_id)
     assert len(conversation) == 2
     response = conversation[-1]
     assert len(response.message_pieces) == 1
@@ -118,11 +120,11 @@ async def test_image_input_filters(sqlite_instance, endpoint, api_key, model_nam
     assert response_piece.response_error == "blocked"
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("endpoint", "api_key", "model_name"),
     [("AZURE_OPENAI_VIDEO_ENDPOINT", "AZURE_OPENAI_VIDEO_KEY", "AZURE_OPENAI_VIDEO_MODEL")],
 )
+@pytest.mark.skip(reason=_AZURE_KEY_AUTH_DISABLED_REASON)
 async def test_video_input_filters(sqlite_instance, endpoint, api_key, model_name):
     target = OpenAIVideoTarget(
         endpoint=os.getenv(endpoint),
@@ -136,7 +138,7 @@ async def test_video_input_filters(sqlite_instance, endpoint, api_key, model_nam
     attack = PromptSendingAttack(objective_target=target)
     result = await attack.execute_async(objective=prompt)
     assert result is not None
-    conversation = sqlite_instance.get_conversation(conversation_id=result.conversation_id)
+    conversation = sqlite_instance.get_conversation_messages(conversation_id=result.conversation_id)
     assert len(conversation) == 2
     response = conversation[-1]
     assert len(response.message_pieces) == 1

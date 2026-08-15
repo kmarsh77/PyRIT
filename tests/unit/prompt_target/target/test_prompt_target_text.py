@@ -9,17 +9,16 @@ from tempfile import NamedTemporaryFile
 import pytest
 from unit.mocks import get_sample_conversations
 
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import TextTarget
 
 
 @pytest.fixture
 def sample_entries() -> MutableSequence[MessagePiece]:
     conversations = get_sample_conversations()
-    return Message.flatten_to_message_pieces(conversations)
+    return flatten_to_message_pieces(conversations)
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_send_prompt_user_no_system(sample_entries: MutableSequence[MessagePiece]):
     output_stream = io.StringIO()
@@ -37,7 +36,6 @@ async def test_send_prompt_user_no_system(sample_entries: MutableSequence[Messag
     assert request.converted_value in captured_output
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_send_prompt_stream(sample_entries: MutableSequence[MessagePiece]):
     with NamedTemporaryFile(mode="w+", delete=False) as tmp_file:

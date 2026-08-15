@@ -13,7 +13,7 @@ from pyrit.exceptions.exception_classes import (
     EmptyResponseException,
     RateLimitException,
 )
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import OpenAIImageTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
@@ -22,7 +22,7 @@ from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 @pytest.fixture
 def image_target(patch_central_database) -> OpenAIImageTarget:
     return OpenAIImageTarget(
-        model_name="dall-e-3",
+        model_name="gpt-image-1",
         endpoint="test",
         api_key="test",
         custom_configuration=TargetConfiguration(
@@ -49,22 +49,21 @@ def image_response_json() -> dict:
                 "b64_json": "aGVsbG8=",
             }
         ],
-        "model": "dall-e-3",
+        "model": "gpt-image-1",
     }
 
 
 @pytest.fixture
 def sample_conversations() -> MutableSequence[MessagePiece]:
     conversations = get_sample_conversations()
-    return Message.flatten_to_message_pieces(conversations)
+    return flatten_to_message_pieces(conversations)
 
 
 def test_initialization_with_required_parameters(image_target: OpenAIImageTarget):
     assert image_target
-    assert image_target._model_name == "dall-e-3"
+    assert image_target._model_name == "gpt-image-1"
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_generate(
     image_target: OpenAIImageTarget,
     sample_conversations: MutableSequence[MessagePiece],
@@ -81,7 +80,7 @@ async def test_send_prompt_async_generate(
     with patch.object(image_target._async_client.images, "generate", new_callable=AsyncMock) as mock_generate:
         mock_generate.return_value = mock_response
 
-        resp = await image_target.send_prompt_async(message=Message([request]))
+        resp = await image_target.send_prompt_async(message=Message(message_pieces=[request]))
         assert len(resp) == 1
         assert resp
         path = resp[0].message_pieces[0].original_value
@@ -94,7 +93,6 @@ async def test_send_prompt_async_generate(
         os.remove(path)
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_edit(
     image_target: OpenAIImageTarget,
 ):
@@ -117,7 +115,7 @@ async def test_send_prompt_async_edit(
     with patch.object(image_target._async_client.images, "edit", new_callable=AsyncMock) as mock_edit:
         mock_edit.return_value = mock_response
 
-        resp = await image_target.send_prompt_async(message=Message([text_piece, image_piece]))
+        resp = await image_target.send_prompt_async(message=Message(message_pieces=[text_piece, image_piece]))
         assert len(resp) == 1
         assert resp
         path = resp[0].message_pieces[0].original_value
@@ -132,7 +130,42 @@ async def test_send_prompt_async_edit(
     os.remove(image_piece.original_value)
 
 
-@pytest.mark.asyncio
+async def test_send_prompt_async_edit_single_image_passes_tuple_not_list(
+    image_target: OpenAIImageTarget,
+):
+    image_piece = get_image_message_piece()
+    text_piece = MessagePiece(
+        role="user",
+        conversation_id=image_piece.conversation_id,
+        original_value="edit this image",
+        converted_value="edit this image",
+        original_value_data_type="text",
+        converted_value_data_type="text",
+    )
+
+    mock_response = MagicMock()
+    mock_image = MagicMock()
+    mock_image.b64_json = "aGVsbG8="
+    mock_response.data = [mock_image]
+
+    with patch.object(image_target._async_client.images, "edit", new_callable=AsyncMock) as mock_edit:
+        mock_edit.return_value = mock_response
+
+        resp = await image_target.send_prompt_async(message=Message(message_pieces=[text_piece, image_piece]))
+        assert resp
+
+        call_kwargs = mock_edit.call_args[1]
+        assert isinstance(call_kwargs["image"], tuple)
+        assert len(call_kwargs["image"]) == 3
+
+        path = resp[0].message_pieces[0].original_value
+        if os.path.isfile(path):
+            os.remove(path)
+
+    if os.path.isfile(image_piece.original_value):
+        os.remove(image_piece.original_value)
+
+
 async def test_send_prompt_async_edit_multiple_images(
     image_target: OpenAIImageTarget,
 ):
@@ -156,7 +189,9 @@ async def test_send_prompt_async_edit_multiple_images(
     with patch.object(image_target._async_client.images, "edit", new_callable=AsyncMock) as mock_edit:
         mock_edit.return_value = mock_response
 
-        resp = await image_target.send_prompt_async(message=Message([image_piece, text_piece] + image_pieces))
+        resp = await image_target.send_prompt_async(
+            message=Message(message_pieces=[image_piece, text_piece] + image_pieces)
+        )
         assert len(resp) == 1
         assert resp
         path = resp[0].message_pieces[0].original_value
@@ -171,7 +206,6 @@ async def test_send_prompt_async_edit_multiple_images(
     os.remove(image_piece.original_value)
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_invalid_image_path(
     image_target: OpenAIImageTarget,
 ):
@@ -194,10 +228,9 @@ async def test_send_prompt_async_invalid_image_path(
     )
 
     with pytest.raises(FileNotFoundError):
-        await image_target.send_prompt_async(message=Message([text_piece, image_piece]))
+        await image_target.send_prompt_async(message=Message(message_pieces=[text_piece, image_piece]))
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_empty_response(
     image_target: OpenAIImageTarget,
     sample_conversations: MutableSequence[MessagePiece],
@@ -217,10 +250,9 @@ async def test_send_prompt_async_empty_response(
         mock_generate.return_value = mock_response
 
         with pytest.raises(EmptyResponseException):
-            await image_target.send_prompt_async(message=Message([request]))
+            await image_target.send_prompt_async(message=Message(message_pieces=[request]))
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_rate_limit_exception(
     image_target: OpenAIImageTarget, sample_conversations: MutableSequence[MessagePiece]
 ):
@@ -234,10 +266,9 @@ async def test_send_prompt_async_rate_limit_exception(
         mock_generate.side_effect = RateLimitError("Rate Limit Reached", response=MagicMock(), body={})
 
         with pytest.raises(RateLimitException):
-            await image_target.send_prompt_async(message=Message([request]))
+            await image_target.send_prompt_async(message=Message(message_pieces=[request]))
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_bad_request_error(
     image_target: OpenAIImageTarget, sample_conversations: MutableSequence[MessagePiece]
 ):
@@ -260,17 +291,16 @@ async def test_send_prompt_async_bad_request_error(
         mock_generate.side_effect = bad_request_error
 
         # Non-content-filter BadRequestError should be re-raised (same as chat target behavior)
-        with pytest.raises(Exception):  # noqa: B017
-            await image_target.send_prompt_async(message=Message([request]))
+        with pytest.raises(Exception):
+            await image_target.send_prompt_async(message=Message(message_pieces=[request]))
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_empty_response_adds_memory(
     image_target: OpenAIImageTarget,
     sample_conversations: MutableSequence[MessagePiece],
 ) -> None:
     mock_memory = MagicMock()
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     mock_memory.add_message_to_memory = AsyncMock()
 
     request = sample_conversations[0]
@@ -288,16 +318,15 @@ async def test_send_prompt_async_empty_response_adds_memory(
         image_target._memory = mock_memory
 
         with pytest.raises(EmptyResponseException):
-            await image_target.send_prompt_async(message=Message([request]))
+            await image_target.send_prompt_async(message=Message(message_pieces=[request]))
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_rate_limit_adds_memory(
     image_target: OpenAIImageTarget,
     sample_conversations: MutableSequence[MessagePiece],
 ) -> None:
     mock_memory = MagicMock()
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     mock_memory.add_message_to_memory = AsyncMock()
 
     request = sample_conversations[0]
@@ -311,10 +340,9 @@ async def test_send_prompt_async_rate_limit_adds_memory(
         image_target._memory = mock_memory
 
         with pytest.raises(RateLimitException):
-            await image_target.send_prompt_async(message=Message([request]))
+            await image_target.send_prompt_async(message=Message(message_pieces=[request]))
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_bad_request_content_filter(
     image_target: OpenAIImageTarget,
     sample_conversations: MutableSequence[MessagePiece],
@@ -338,13 +366,12 @@ async def test_send_prompt_async_bad_request_content_filter(
 
     with patch.object(image_target._async_client.images, "generate", new_callable=AsyncMock) as mock_generate:
         mock_generate.side_effect = bad_request_error
-        result = await image_target.send_prompt_async(message=Message([request]))
+        result = await image_target.send_prompt_async(message=Message(message_pieces=[request]))
         assert len(result) == 1
         assert result[0].message_pieces[0].converted_value_data_type == "error"
         assert "content_filter" in result[0].message_pieces[0].converted_value
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_bad_request_content_policy_violation(
     image_target: OpenAIImageTarget,
     sample_conversations: MutableSequence[MessagePiece],
@@ -368,62 +395,12 @@ async def test_send_prompt_async_bad_request_content_policy_violation(
 
     with patch.object(image_target._async_client.images, "generate", new_callable=AsyncMock) as mock_generate:
         mock_generate.side_effect = bad_request_error
-        result = await image_target.send_prompt_async(message=Message([request]))
+        result = await image_target.send_prompt_async(message=Message(message_pieces=[request]))
         assert len(result) == 1
         assert result[0].message_pieces[0].response_error == "blocked"
         assert result[0].message_pieces[0].converted_value_data_type == "error"
 
 
-@pytest.mark.asyncio
-async def test_send_prompt_async_url_response_downloads_image(
-    image_target: OpenAIImageTarget,
-    sample_conversations: MutableSequence[MessagePiece],
-):
-    """Test that when model returns URL instead of base64, the image is downloaded from URL."""
-    request = sample_conversations[0]
-    request.conversation_id = str(uuid.uuid4())
-
-    # Response returns URL (no b64_json)
-    mock_response_url = MagicMock()
-    mock_image_url = MagicMock()
-    mock_image_url.b64_json = None
-    mock_image_url.url = "https://example.com/image.png"
-    mock_response_url.data = [mock_image_url]
-
-    # Mock httpx response for URL download
-    mock_http_response = MagicMock()
-    mock_http_response.content = b"hello"
-    mock_http_response.raise_for_status = MagicMock()
-
-    with patch.object(image_target._async_client.images, "generate", new_callable=AsyncMock) as mock_generate:
-        mock_generate.return_value = mock_response_url
-
-        with patch("pyrit.prompt_target.openai.openai_image_target.httpx.AsyncClient") as mock_httpx:
-            mock_client_instance = AsyncMock()
-            mock_client_instance.get = AsyncMock(return_value=mock_http_response)
-            mock_httpx.return_value.__aenter__.return_value = mock_client_instance
-
-            resp = await image_target.send_prompt_async(message=Message([request]))
-
-            # Should have called generate once
-            assert mock_generate.call_count == 1
-
-            # Should have downloaded from the URL
-            mock_client_instance.get.assert_called_once_with("https://example.com/image.png")
-
-            # Should have successfully returned the image
-            assert len(resp) == 1
-            path = resp[0].message_pieces[0].original_value
-            assert os.path.isfile(path)
-
-            with open(path, "rb") as file:
-                data = file.read()
-                assert data == b"hello"
-
-            os.remove(path)
-
-
-@pytest.mark.asyncio
 async def test_validate_no_text_piece(image_target: OpenAIImageTarget):
     image_piece = get_image_message_piece()
 
@@ -436,7 +413,6 @@ async def test_validate_no_text_piece(image_target: OpenAIImageTarget):
             os.remove(image_piece.original_value)
 
 
-@pytest.mark.asyncio
 async def test_validate_multiple_text_pieces(image_target: OpenAIImageTarget):
     request = Message(
         message_pieces=[
@@ -463,7 +439,6 @@ async def test_validate_multiple_text_pieces(image_target: OpenAIImageTarget):
         await image_target.send_prompt_async(message=request)
 
 
-@pytest.mark.asyncio
 async def test_validate_image_pieces(image_target: OpenAIImageTarget):
     image_piece = get_image_message_piece()
     image_pieces = [image_piece for _ in range(OpenAIImageTarget._MAX_INPUT_IMAGES + 1)]
@@ -488,7 +463,6 @@ async def test_validate_image_pieces(image_target: OpenAIImageTarget):
             os.remove(image_piece.original_value)
 
 
-@pytest.mark.asyncio
 async def test_validate_piece_type(image_target: OpenAIImageTarget):
     audio_piece = get_audio_message_piece()
     text_piece = MessagePiece(
@@ -512,7 +486,6 @@ async def test_validate_piece_type(image_target: OpenAIImageTarget):
             os.remove(audio_piece.original_value)
 
 
-@pytest.mark.asyncio
 async def test_validate_previous_conversations(
     image_target: OpenAIImageTarget, sample_conversations: MutableSequence[MessagePiece]
 ):
@@ -521,7 +494,7 @@ async def test_validate_previous_conversations(
     prior_message = Message(message_pieces=[message_piece])
 
     mock_memory = MagicMock()
-    mock_memory.get_conversation.return_value = [prior_message]
+    mock_memory.get_conversation_messages.return_value = [prior_message]
     mock_memory.add_message_to_memory = AsyncMock()
 
     image_target._memory = mock_memory
@@ -534,3 +507,102 @@ async def test_validate_previous_conversations(
         " custom_configuration parameter accordingly",
     ):
         await image_target.send_prompt_async(message=request)
+
+
+def test_background_param_stored(patch_central_database):
+    target = OpenAIImageTarget(
+        model_name="gpt-image-1",
+        endpoint="test",
+        api_key="test",
+        background="transparent",
+    )
+    assert target.background == "transparent"
+
+
+def test_background_default_is_none(patch_central_database):
+    target = OpenAIImageTarget(
+        model_name="gpt-image-1",
+        endpoint="test",
+        api_key="test",
+    )
+    assert target.background is None
+
+
+@pytest.mark.asyncio
+async def test_generate_request_passes_background(
+    image_target: OpenAIImageTarget,
+    sample_conversations: MutableSequence[MessagePiece],
+):
+    image_target.background = "transparent"
+    request = sample_conversations[0]
+
+    mock_response = MagicMock()
+    mock_image = MagicMock()
+    mock_image.b64_json = "aGVsbG8="
+    mock_response.data = [mock_image]
+
+    with patch.object(image_target._async_client.images, "generate", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = mock_response
+
+        resp = await image_target.send_prompt_async(message=Message(message_pieces=[request]))
+        assert resp
+
+        call_kwargs = mock_generate.call_args[1]
+        assert call_kwargs["background"] == "transparent"
+
+        path = resp[0].message_pieces[0].original_value
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+@pytest.mark.asyncio
+async def test_generate_request_omits_background_when_none(
+    image_target: OpenAIImageTarget,
+    sample_conversations: MutableSequence[MessagePiece],
+):
+    assert image_target.background is None
+    request = sample_conversations[0]
+
+    mock_response = MagicMock()
+    mock_image = MagicMock()
+    mock_image.b64_json = "aGVsbG8="
+    mock_response.data = [mock_image]
+
+    with patch.object(image_target._async_client.images, "generate", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = mock_response
+
+        resp = await image_target.send_prompt_async(message=Message(message_pieces=[request]))
+        assert resp
+
+        call_kwargs = mock_generate.call_args[1]
+        assert "background" not in call_kwargs
+
+        path = resp[0].message_pieces[0].original_value
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+def test_transparent_background_with_jpeg_raises(patch_central_database):
+    with pytest.raises(
+        ValueError, match="background='transparent' requires an output format that supports transparency"
+    ):
+        OpenAIImageTarget(
+            model_name="gpt-image-1",
+            endpoint="test",
+            api_key="test",
+            background="transparent",
+            output_format="jpeg",
+        )
+
+
+@pytest.mark.parametrize("valid_format", ["png", "webp"])
+def test_transparent_background_with_valid_format_succeeds(patch_central_database, valid_format):
+    target = OpenAIImageTarget(
+        model_name="gpt-image-1",
+        endpoint="test",
+        api_key="test",
+        background="transparent",
+        output_format=valid_format,
+    )
+    assert target.background == "transparent"
+    assert target.output_format == valid_format

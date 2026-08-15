@@ -4,13 +4,18 @@
 import logging
 import uuid
 from enum import Enum
-from typing import Literal, Optional
+from typing import Literal
 
-from pyrit.common.net_utility import make_request_and_raise_if_error_async
+from typing_extensions import override
+
+from pyrit.datasets.seed_datasets.remote._image_cache import (
+    fetch_and_cache_image_async,
+)
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
-from pyrit.models import SeedDataset, SeedPrompt, data_serializer_factory
+from pyrit.models import Modality, SeedDataset, SeedPrompt, SeedUnion
+from pyrit.models.harm_category import HarmCategory
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +46,34 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
     Paper: [@mazeika2024harmbench]
     """
 
+    _AUTHORS = [
+        "Mantas Mazeika",
+        "Long Phan",
+        "Xuwang Yin",
+        "Andy Zou",
+        "Zifan Wang",
+        "Norman Mu",
+        "Elham Sakhaee",
+        "Nathaniel Li",
+        "Steven Basart",
+        "Bo Li",
+        "David Forsyth",
+        "Dan Hendrycks",
+    ]
+
+    _GROUPS = [
+        "University of Illinois Urbana-Champaign",
+        "Center for AI Safety",
+        "Carnegie Mellon University",
+        "UC Berkeley",
+        "Microsoft",
+    ]
+
+    # Metadata
+    modalities: tuple[Modality, ...] = (Modality.TEXT, Modality.IMAGE)
+    size: str = "medium"  # 220 harmful multimodal behaviors
+    tags: frozenset[str] = frozenset({"safety", "jailbreak", "multimodal"})
+
     def __init__(
         self,
         *,
@@ -49,8 +82,8 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
             "harmbench_behaviors_multimodal_all.csv"
         ),
         source_type: Literal["public_url", "file"] = "public_url",
-        categories: Optional[list[SemanticCategory]] = None,
-    ):
+        categories: list[SemanticCategory] | None = None,
+    ) -> None:
         """
         Initialize the HarmBench multimodal dataset loader.
 
@@ -68,14 +101,18 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
         self.categories = categories
 
         if categories is not None:
+            if not categories:
+                raise ValueError("`categories` must be a non-empty list (pass None to include all categories)")
             self._validate_enums(categories, SemanticCategory, "semantic category")
 
     @property
+    @override
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "harmbench_multimodal"
 
-    async def fetch_dataset(self, *, cache: bool = True) -> SeedDataset:
+    @override
+    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch HarmBench multimodal examples and return as SeedDataset.
 
@@ -100,8 +137,21 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
             cache=cache,
         )
 
-        prompts = []
+        prompts: list[SeedUnion] = []
         failed_image_count = 0
+        harm_category_alias_overrides: dict[str, list[HarmCategory]] = {
+            "chemical_biological": [HarmCategory.CBRN],
+            "cybercrime_intrusion": [HarmCategory.COORDINATION_HARM, HarmCategory.MALWARE],
+            "harassment_bullying": [
+                HarmCategory.HARASSMENT,
+                HarmCategory.HATE_SPEECH,
+                HarmCategory.REPRESENTATIONAL,
+            ],
+            "illegal": [HarmCategory.COORDINATION_HARM],
+            "misinformation_disinformation": [HarmCategory.INFO_INTEGRITY],
+            "harmful": [HarmCategory.OTHER],
+            "copyright": [HarmCategory.COPYRIGHT],
+        }
 
         for example in examples:
             missing_keys = required_keys - example.keys()
@@ -112,6 +162,10 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
                 continue
 
             semantic_category = example["SemanticCategory"]
+            standardized_categories = self._standardize_harm_categories(
+                semantic_category,
+                alias_overrides=harm_category_alias_overrides,
+            )
 
             # Filter by categories if specified
             if self.categories is not None:
@@ -151,17 +205,20 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
                 data_type="image_path",
                 name=f"HarmBench Multimodal Image - {behavior_id}",
                 dataset_name=self.dataset_name,
-                harm_categories=[semantic_category],
+                harm_categories=standardized_categories,
                 description=f"An image prompt from the HarmBench multimodal dataset, BehaviorID: {behavior_id}",
                 source=self.source,
                 prompt_group_id=group_id,
                 sequence=0,
                 metadata={
                     "behavior_id": behavior_id,
+                    "semantic_category": semantic_category,
                     "image_description": image_description,
                     "redacted_image_description": redacted_description,
                     "original_image_url": image_url,
                 },
+                authors=self._AUTHORS,
+                groups=self._GROUPS,
             )
             prompts.append(image_prompt)
 
@@ -170,35 +227,17 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
                 data_type="text",
                 name=f"HarmBench Multimodal Text - {behavior_id}",
                 dataset_name=self.dataset_name,
-                harm_categories=[semantic_category],
+                harm_categories=standardized_categories,
                 description=f"A text prompt from the HarmBench multimodal dataset, BehaviorID: {behavior_id}",
                 source=self.source,
                 prompt_group_id=group_id,
                 sequence=0,
                 metadata={
                     "behavior_id": behavior_id,
+                    "semantic_category": semantic_category,
                 },
-                authors=[
-                    "Mantas Mazeika",
-                    "Long Phan",
-                    "Xuwang Yin",
-                    "Andy Zou",
-                    "Zifan Wang",
-                    "Norman Mu",
-                    "Elham Sakhaee",
-                    "Nathaniel Li",
-                    "Steven Basart",
-                    "Bo Li",
-                    "David Forsyth",
-                    "Dan Hendrycks",
-                ],
-                groups=[
-                    "University of Illinois Urbana-Champaign",
-                    "Center for AI Safety",
-                    "Carnegie Mellon University",
-                    "UC Berkeley",
-                    "Microsoft",
-                ],
+                authors=self._AUTHORS,
+                groups=self._GROUPS,
             )
             prompts.append(text_prompt)
 
@@ -221,19 +260,12 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
 
         Returns:
             Local path to the saved image.
+
+        Raises:
+            RuntimeError: If the serializer memory is not properly configured.
         """
-        filename = f"harmbench_{behavior_id}.png"
-        serializer = data_serializer_factory(category="seed-prompt-entries", data_type="image_path", extension="png")
-
-        # Return existing path if image already exists for this BehaviorID
-        serializer.value = str(serializer._memory.results_path + serializer.data_sub_directory + f"/{filename}")
-        try:
-            if await serializer._memory.results_storage_io.path_exists(serializer.value):
-                return serializer.value
-        except Exception as e:
-            logger.warning(f"[HarmBench-Multimodal] Failed to check if image for {behavior_id} exists in cache: {e}")
-
-        response = await make_request_and_raise_if_error_async(endpoint_uri=image_url, method="GET")
-        await serializer.save_data(data=response.content, output_filename=filename.replace(".png", ""))
-
-        return str(serializer.value)
+        return await fetch_and_cache_image_async(
+            filename=f"harmbench_{behavior_id}.png",
+            image_url=image_url,
+            log_prefix="HarmBench-Multimodal",
+        )

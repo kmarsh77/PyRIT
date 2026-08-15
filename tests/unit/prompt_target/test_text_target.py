@@ -9,14 +9,14 @@ from collections.abc import MutableSequence
 import pytest
 from unit.mocks import get_sample_conversations
 
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import TextTarget
 
 
 @pytest.fixture
 def sample_entries() -> MutableSequence[MessagePiece]:
     conversations = get_sample_conversations()
-    return Message.flatten_to_message_pieces(conversations)
+    return flatten_to_message_pieces(conversations)
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -34,7 +34,6 @@ def test_init_with_custom_stream():
     assert target._text_stream is stream
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_send_prompt_async_writes_to_stream(sample_entries: MutableSequence[MessagePiece]):
     output_stream = io.StringIO()
@@ -49,7 +48,6 @@ async def test_send_prompt_async_writes_to_stream(sample_entries: MutableSequenc
     assert "test prompt content" in captured
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_send_prompt_async_returns_empty_list(sample_entries: MutableSequence[MessagePiece]):
     output_stream = io.StringIO()
@@ -61,7 +59,6 @@ async def test_send_prompt_async_returns_empty_list(sample_entries: MutableSeque
     assert result == []
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_send_prompt_async_writes_to_file(sample_entries: MutableSequence[MessagePiece]):
     with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".txt") as tmp_file:
@@ -78,7 +75,6 @@ async def test_send_prompt_async_writes_to_file(sample_entries: MutableSequence[
     assert "file write test" in content
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_send_prompt_async_appends_newline(sample_entries: MutableSequence[MessagePiece]):
     output_stream = io.StringIO()
@@ -93,9 +89,8 @@ async def test_send_prompt_async_appends_newline(sample_entries: MutableSequence
     assert captured.endswith("\n")
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("patch_central_database")
 async def test_cleanup_target_does_nothing():
     target = TextTarget(text_stream=io.StringIO())
     # Should not raise
-    await target.cleanup_target()
+    await target.cleanup_target_async()

@@ -63,7 +63,6 @@ def test_http_target_sets_endpoint_and_rate_limit(mock_callback_function, sqlite
     assert target._max_requests_per_minute == 25
 
 
-@pytest.mark.asyncio
 @patch("httpx.AsyncClient.request")
 async def test_send_prompt_async(mock_request, mock_http_target, mock_http_response):
     message = MagicMock()
@@ -71,8 +70,10 @@ async def test_send_prompt_async(mock_request, mock_http_target, mock_http_respo
         MagicMock(
             converted_value="test_prompt",
             converted_value_data_type="text",
-            prompt_target_identifier=None,
             attack_identifier=None,
+            conversation_id="",
+            labels={},
+            prompt_metadata={},
         )
     ]
     mock_request.return_value = mock_http_response
@@ -85,6 +86,45 @@ async def test_send_prompt_async(mock_request, mock_http_target, mock_http_respo
         url="https://example.com/",
         headers={"host": "example.com", "content-type": "application/json"},
         content='{"prompt": "test_prompt"}',
+        follow_redirects=True,
+    )
+
+
+@patch("httpx.AsyncClient.request", new_callable=AsyncMock)
+async def test_send_prompt_async_uses_data_for_dict_body(mock_request, mock_http_response, patch_central_database):
+    target = HTTPTarget(http_request="POST / HTTP/1.1\nHost: example.com\n\n")
+    message = MagicMock()
+    message.message_pieces = [
+        MagicMock(
+            converted_value="test_prompt",
+            converted_value_data_type="text",
+            attack_identifier=None,
+            conversation_id="",
+            labels={},
+            prompt_metadata={},
+        )
+    ]
+    mock_request.return_value = mock_http_response
+
+    with patch.object(
+        target,
+        "parse_raw_http_request",
+        return_value=(
+            {"host": "example.com"},
+            {"prompt": "test_prompt"},
+            "https://example.com/",
+            "POST",
+            "HTTP/1.1",
+        ),
+    ):
+        response = await target.send_prompt_async(message=message)
+
+    assert len(response) == 1
+    mock_request.assert_awaited_once_with(
+        method="POST",
+        url="https://example.com/",
+        headers={"host": "example.com"},
+        data={"prompt": "test_prompt"},
         follow_redirects=True,
     )
 
@@ -110,7 +150,6 @@ def test_parse_raw_http_respects_url_path(patch_central_database):
     assert headers == {"host": "example.com", "content-type": "application/json"}
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_client_kwargs(patch_central_database):
     with patch("httpx.AsyncClient.request", new_callable=AsyncMock) as mock_request:
         # Create httpx_client_kwargs to test
@@ -124,8 +163,10 @@ async def test_send_prompt_async_client_kwargs(patch_central_database):
             MagicMock(
                 converted_value="",
                 converted_value_data_type="text",
-                prompt_target_identifier=None,
                 attack_identifier=None,
+                conversation_id="",
+                labels={},
+                prompt_metadata={},
             )
         ]
         mock_response = MagicMock()
@@ -144,14 +185,12 @@ async def test_send_prompt_async_client_kwargs(patch_central_database):
         assert http_target._client is None
 
 
-@pytest.mark.asyncio
 async def test_send_prompt_async_validation(mock_http_target):
     # Creating a Message with no pieces raises immediately
     with pytest.raises(ValueError, match="must have at least one message piece"):
         Message(message_pieces=[])
 
 
-@pytest.mark.asyncio
 @patch("httpx.AsyncClient.request")
 async def test_send_prompt_regex_parse_async(mock_request, mock_http_target):
     callback_function = get_http_target_regex_matching_callback_function(key=r"Match: (\d+)")
@@ -162,8 +201,10 @@ async def test_send_prompt_regex_parse_async(mock_request, mock_http_target):
         MagicMock(
             converted_value="test_prompt",
             converted_value_data_type="text",
-            prompt_target_identifier=None,
             attack_identifier=None,
+            conversation_id="",
+            labels={},
+            prompt_metadata={},
         )
     ]
 
@@ -184,7 +225,6 @@ async def test_send_prompt_regex_parse_async(mock_request, mock_http_target):
     )
 
 
-@pytest.mark.asyncio
 @patch("httpx.AsyncClient.request")
 async def test_send_prompt_async_keeps_original_template(mock_request, mock_http_target, mock_http_response):
     original_http_request = mock_http_target.http_request
@@ -196,8 +236,10 @@ async def test_send_prompt_async_keeps_original_template(mock_request, mock_http
         MagicMock(
             converted_value="test_prompt",
             converted_value_data_type="text",
-            prompt_target_identifier=None,
             attack_identifier=None,
+            conversation_id="",
+            labels={},
+            prompt_metadata={},
         )
     ]
     response = await mock_http_target.send_prompt_async(message=message)
@@ -221,8 +263,10 @@ async def test_send_prompt_async_keeps_original_template(mock_request, mock_http
         MagicMock(
             converted_value="second_test_prompt",
             converted_value_data_type="text",
-            prompt_target_identifier=None,
             attack_identifier=None,
+            conversation_id="",
+            labels={},
+            prompt_metadata={},
         )
     ]
     await mock_http_target.send_prompt_async(message=second_message)
@@ -249,7 +293,6 @@ async def test_send_prompt_async_keeps_original_template(mock_request, mock_http
     )
 
 
-@pytest.mark.asyncio
 async def test_http_target_with_injected_client(patch_central_database):
     custom_client = httpx.AsyncClient(timeout=30.0, verify=False, headers={"X-Custom-Header": "test_value"})
 
@@ -276,8 +319,10 @@ async def test_http_target_with_injected_client(patch_central_database):
             MagicMock(
                 converted_value="test_prompt",
                 converted_value_data_type="text",
-                prompt_target_identifier=None,
                 attack_identifier=None,
+                conversation_id="",
+                labels={},
+                prompt_metadata={},
             )
         ]
 

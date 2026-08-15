@@ -27,10 +27,13 @@
       "value": "YOUR_DATABASE_NAME"
     },
     "pyritInitializer": {
-      "value": "targets airt"
+      "value": "target"
     },
     "envSecretName": {
       "value": "env-global"
+    },
+    "envFileContents": {
+      "value": ""
     },
     "logRetentionDays": {
       "value": 90

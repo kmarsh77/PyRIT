@@ -1,25 +1,75 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import type { ChangeEvent } from 'react'
 import {
   Button,
+  Drawer,
+  Menu,
+  MenuItem,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
+  mergeClasses,
+  Switch,
   Text,
-  Badge,
   Tooltip,
+  useRestoreFocusSource,
+  useRestoreFocusTarget,
 } from '@fluentui/react-components'
-import { AddRegular, PanelRightRegular } from '@fluentui/react-icons'
+import type { SwitchOnChangeData } from '@fluentui/react-components'
+import { AddRegular, ArrowDownloadRegular, PanelRightRegular } from '@fluentui/react-icons'
 import MessageList from './MessageList'
+import SystemPromptBanner from './SystemPromptBanner'
 import ChatInputArea from './ChatInputArea'
 import ConversationPanel from './ConversationPanel'
 import ConverterPanel from './ConverterPanel'
+import TargetBadge from './TargetBadge'
 import type { PieceConversion } from './converterTypes'
-import { PIECE_TYPE_TO_DATA_TYPE } from './converterTypes'
+import { PIECE_TYPE_TO_DATA_TYPE, basenameFromValue, buildMediaUrl, dataTypeToAttachmentKind, isPathDataType } from './converterTypes'
 import LabelsBar from '../Labels/LabelsBar'
 import type { ChatInputAreaHandle } from './ChatInputArea'
 import { attacksApi } from '../../services/api'
 import { toApiError } from '../../services/errors'
 import { buildMessagePieces, backendMessagesToFrontend } from '../../utils/messageMapper'
-import type { Message, MessageAttachment, TargetInstance, TargetInfo } from '../../types'
+import { exportConversation } from '../../utils/conversationExport'
+import type { ExportFormat } from '../../utils/conversationExport'
+import type {
+  AttackTargetResolutionStatus,
+  Message,
+  MessageAttachment,
+  TargetInstance,
+  TargetInfo,
+} from '../../types'
+import { isTargetResolutionBlocking, targetInfoMatchesTarget } from '../../utils/targetIdentity'
 import type { ViewName } from '../Sidebar/Navigation'
 import { useChatWindowStyles } from './ChatWindow.styles'
+
+const NARROW_SCREEN_QUERY = '(max-width: 600px)'
+const MARKDOWN_PREFERENCE_STORAGE_KEY = 'pyrit.chatMarkdownMode'
+
+function readStoredMarkdownPreference(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    const storedPreference = window.localStorage.getItem(MARKDOWN_PREFERENCE_STORAGE_KEY)
+    return storedPreference === 'markdown'
+  } catch {
+    return false
+  }
+}
+
+function persistMarkdownPreference(enabled: boolean): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(MARKDOWN_PREFERENCE_STORAGE_KEY, enabled ? 'markdown' : 'raw')
+  } catch {
+    /* localStorage may be unavailable (private mode, quota, sandboxed iframe). */
+  }
+}
+
+function matchesNarrowScreen(): boolean {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia(NARROW_SCREEN_QUERY).matches
+}
 
 interface ChatWindowProps {
   onNewAttack: () => void
@@ -36,6 +86,10 @@ interface ChatWindowProps {
   attackLabels?: Record<string, string> | null
   /** Target info that the current attack was started with (for cross-target guard). */
   attackTarget?: TargetInfo | null
+  /** Result of resolving the persisted attack target against the current registry. */
+  targetResolutionStatus?: AttackTargetResolutionStatus
+  /** Re-run target registry resolution after a transient or unavailable result. */
+  onRetryTargetResolution?: () => void
   /** True while a historical attack is being loaded from the history view. */
   isLoadingAttack?: boolean
   /** Number of related (non-main) conversations in the loaded attack. */
@@ -55,10 +109,14 @@ export default function ChatWindow({
   onNavigate,
   attackLabels,
   attackTarget,
+  targetResolutionStatus = 'idle',
+  onRetryTargetResolution,
   isLoadingAttack,
   relatedConversationCount,
 }: ChatWindowProps) {
   const styles = useChatWindowStyles()
+  const restoreFocusTargetAttributes = useRestoreFocusTarget()
+  const restoreFocusSourceAttributes = useRestoreFocusSource()
   const [messages, setMessages] = useState<Message[]>([])
   // Track sending state per conversation so parallel conversations can send independently
   const [sendingConversations, setSendingConversations] = useState<Set<string>>(new Set())
@@ -68,25 +126,83 @@ export default function ChatWindow({
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null)
   const isSending = activeConversationId ? sendingConversations.has(activeConversationId) : Boolean(sendingConversations.size)
   const [isPanelOpen, setIsPanelOpen] = useState(false)
+  const [isNarrowScreen, setIsNarrowScreen] = useState(matchesNarrowScreen)
   const [isConverterPanelOpen, setIsConverterPanelOpen] = useState(false)
+  // Conversation-wide preference for rendering message text as Markdown.
+  const [globalMarkdown, setGlobalMarkdown] = useState(() => readStoredMarkdownPreference())
   const [chatInputText, setChatInputText] = useState('')
+  const [systemPrompt, setSystemPrompt] = useState('')
   const [attachmentTypes, setAttachmentTypes] = useState<string[]>([])
   const [attachmentData, setAttachmentData] = useState<Record<string, string>>({})
   const [pieceConversions, setPieceConversions] = useState<Record<string, PieceConversion>>({})
   const [panelRefreshKey, setPanelRefreshKey] = useState(0)
   const inputBoxRef = useRef<ChatInputAreaHandle>(null)
 
+  const handleMarkdownChange = useCallback((
+    _event: ChangeEvent<HTMLInputElement>,
+    data: SwitchOnChangeData,
+  ): void => {
+    setGlobalMarkdown(data.checked)
+    persistMarkdownPreference(data.checked)
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return
+    }
+
+    const mediaQuery = window.matchMedia(NARROW_SCREEN_QUERY)
+    const handleChange = (event: MediaQueryListEvent) => {
+      setIsNarrowScreen(event.matches)
+    }
+    mediaQuery.addEventListener('change', handleChange)
+    return () => mediaQuery.removeEventListener('change', handleChange)
+  }, [])
+
   const handleAttachmentsChange = useCallback((types: string[], data: Record<string, string>) => {
     setAttachmentTypes(types)
     setAttachmentData(data)
   }, [])
 
-  // Auto-open conversation sidebar when loading a historical attack with multiple conversations
-  useEffect(() => {
-    if (relatedConversationCount && relatedConversationCount > 0) {
+  // Auto-prune stale conversions whose original input no longer matches.
+  // For text: the typed text differs from the captured originalValue.
+  // For media: the uploaded base64 changed (or was removed).
+  // Deriving this rather than syncing via an effect avoids triggering
+  // react-hooks/set-state-in-effect and is the pattern recommended by React
+  // (see frontend-style-guide → "Prefer Derived Values Over Effects").
+  const activePieceConversions = useMemo(() => {
+    const entries = Object.entries(pieceConversions)
+    if (entries.length === 0) return pieceConversions
+    const next: Record<string, PieceConversion> = {}
+    let hasStale = false
+    for (const [key, conv] of entries) {
+      const stillValid = key === 'text'
+        ? conv.originalValue === chatInputText
+        : attachmentData[key] === conv.originalValue
+      if (stillValid) {
+        next[key] = conv
+      } else {
+        hasStale = true
+      }
+    }
+    return hasStale ? next : pieceConversions
+  }, [pieceConversions, chatInputText, attachmentData])
+
+  // Auto-open conversation sidebar when loading a historical attack with multiple
+  // conversations. Uses the "adjust state during render" pattern to avoid
+  // react-hooks/set-state-in-effect.
+  const [autoOpenedForAttack, setAutoOpenedForAttack] = useState<string | null>(null)
+  if (
+    attackResultId
+    && attackResultId !== autoOpenedForAttack
+    && relatedConversationCount
+    && relatedConversationCount > 0
+  ) {
+    setAutoOpenedForAttack(attackResultId)
+    if (!isNarrowScreen) {
       setIsPanelOpen(true)
     }
-  }, [attackResultId, relatedConversationCount])
+  }
   // Set by panel click to bypass the in-flight guard on the next useEffect cycle.
   // This lets users switch to a sending conversation while still protecting
   // optimistic messages when handleSend internally updates activeConversationId.
@@ -101,13 +217,51 @@ export default function ChatWindow({
   // Used to restore the user's input when switching back to an in-flight conversation.
   const pendingUserMessagesRef = useRef<Map<string, Message[]>>(new Map())
 
-  // Clear internal messages when attack state is reset (e.g. New Attack)
-  useEffect(() => {
+  const supportsSystemPrompt = activeTarget?.capabilities?.supports_system_prompt === true
+  const isTargetResolutionLocked = Boolean(
+    attackResultId
+    && isTargetResolutionBlocking(targetResolutionStatus),
+  )
+  const currentOperator = labels?.operator
+  const attackOperator = attackLabels?.operator
+  // Existing attacks are operator-locked when their operator differs from the current one.
+  const isOperatorLocked = Boolean(
+    attackResultId && attackLabels && attackOperator && currentOperator && attackOperator !== currentOperator,
+  )
+  // They are cross-target locked when the selected target's canonical hash differs from the persisted target.
+  const isCrossTargetLocked = Boolean(
+    attackResultId
+    && attackTarget
+    && activeTarget
+    && !targetInfoMatchesTarget(attackTarget, activeTarget),
+  )
+  // Any failed invariant keeps all mutation controls and handlers read-only.
+  const isMutationLocked = isOperatorLocked || isCrossTargetLocked || isTargetResolutionLocked
+
+  // Clear internal messages when attack state is reset (e.g. New Attack).
+  // Uses the "adjust state during render" pattern (see React docs:
+  // https://react.dev/reference/react/useState#storing-information-from-previous-renders)
+  // instead of a useEffect so we don't trigger react-hooks/set-state-in-effect.
+  const [prevAttackResultId, setPrevAttackResultId] = useState<string | null>(attackResultId)
+  if (attackResultId !== prevAttackResultId) {
+    setPrevAttackResultId(attackResultId)
     if (!attackResultId) {
       setMessages([])
       setLoadedConversationId(null)
+      setSystemPrompt('')
     }
-  }, [attackResultId])
+  }
+
+  // Clear a retained system prompt when switching to a target that can't use it,
+  // so it isn't silently dropped on send. Preserved across supporting targets to
+  // keep the A/B-testing workflow intact.
+  const [prevTargetName, setPrevTargetName] = useState(activeTarget?.target_registry_name)
+  if (activeTarget?.target_registry_name !== prevTargetName) {
+    setPrevTargetName(activeTarget?.target_registry_name)
+    if (!supportsSystemPrompt) {
+      setSystemPrompt('')
+    }
+  }
 
   // Load messages for a given conversation
   const loadConversation = useCallback(async (arId: string, convId: string) => {
@@ -155,9 +309,11 @@ export default function ChatWindow({
   // Synchronous loading derivation: if activeConversationId differs from the
   // conversation whose messages we've loaded, we're in a transition gap.
   // This avoids the 1-frame flash between useEffect fire and render.
+  // Reads `sendingConversations` (state) rather than `sendingConvIdsRef` so the
+  // computation stays render-safe (the ref is for handlers/effects only).
   const awaitingConversationLoad = Boolean(
     activeConversationId && activeConversationId !== loadedConversationId
-    && !sendingConvIdsRef.current.has(activeConversationId)
+    && !sendingConversations.has(activeConversationId)
   )
 
   // Handle conversation selection from the panel
@@ -165,34 +321,57 @@ export default function ChatWindow({
   const handlePanelSelectConversation = useCallback((convId: string) => {
     forceLoadRef.current = true
     onSelectConversation(convId)
+    if (isNarrowScreen) {
+      setIsPanelOpen(false)
+    }
     if (convId === activeConversationId && attackResultId) {
       loadConversation(attackResultId, convId)
     }
-  }, [attackResultId, activeConversationId, onSelectConversation, loadConversation])
+  }, [attackResultId, activeConversationId, isNarrowScreen, onSelectConversation, loadConversation])
 
   const handleSend = async (originalValue: string, convertedValue: string | undefined, attachments: MessageAttachment[]) => {
-    if (!activeTarget) { return }
+    if (
+      !activeTarget
+      || isLoadingAttack
+      || isMutationLocked
+    ) {
+      return
+    }
 
     // Capture all piece conversions upfront before any async work or state clears
-    const conversions = { ...pieceConversions }
+    const conversions = { ...activePieceConversions }
     const textConversion = conversions['text']
+    const isTextTextConversion = textConversion?.convertedDataType === 'text'
+    const isTextFileConversion = Boolean(textConversion) && !isTextTextConversion
 
     // Track which conversation this send belongs to (may be updated after attack creation)
     let sendConvId = activeConversationId || '__pending__'
     // Mark synchronously so the useEffect guard sees it immediately
     sendingConvIdsRef.current.add(sendConvId)
 
-    // When a text converter is active, show a preview locally
-    const hasTextConversion = textConversion != null && convertedValue != null
-    const displayContent = hasTextConversion ? convertedValue : originalValue
+    // When a text→text converter is active, show the converted text as the bubble's
+    // primary content. When a text→file converter is active, keep the typed text
+    // as content and synthesize a file attachment so the bubble shows both.
+    const displayContent = isTextTextConversion && convertedValue != null ? convertedValue : originalValue
+    const optimisticAttachments: MessageAttachment[] = [...attachments]
+    if (isTextFileConversion && textConversion) {
+      const url = buildMediaUrl(textConversion.convertedValue)
+      const kind = dataTypeToAttachmentKind(textConversion.convertedDataType)
+      optimisticAttachments.push({
+        type: kind,
+        name: basenameFromValue(textConversion.convertedValue, `output.${kind}`),
+        url,
+        mimeType: 'application/octet-stream',
+      })
+    }
 
     // Add user message with attachments for display
     const userMessage: Message = {
       role: 'user',
       content: displayContent,
       timestamp: new Date().toISOString(),
-      attachments: attachments.length > 0 ? attachments : undefined,
-      originalContent: hasTextConversion ? originalValue : undefined,
+      attachments: optimisticAttachments.length > 0 ? optimisticAttachments : undefined,
+      originalContent: isTextTextConversion ? originalValue : undefined,
     }
     setMessages(prev => [...prev, userMessage])
 
@@ -237,6 +416,7 @@ export default function ChatWindow({
         const createResponse = await attacksApi.createAttack({
           target_registry_name: activeTarget.target_registry_name,
           labels: labels,
+          system_prompt: supportsSystemPrompt ? systemPrompt.trim() || undefined : undefined,
         })
         currentAttackResultId = createResponse.attack_result_id
         currentConversationId = createResponse.conversation_id
@@ -295,8 +475,21 @@ export default function ChatWindow({
         setLoadedConversationId(effectiveConvId!)
       }
     } catch (err) {
+      const viewedConversationId = viewedConvRef.current
+      const isViewingFailedConversation = viewedConversationId === sendConvId
+        || viewedConversationId === (activeConversationId ?? conversationId)
+        || (viewedConversationId == null && sendConvId !== '__pending__')
+
       // Only show error in UI if user is still on this conversation
-      if (viewedConvRef.current === sendConvId || viewedConvRef.current === (activeConversationId ?? conversationId)) {
+      if (isViewingFailedConversation) {
+        // Mark the viewed conversation as loaded so first-send failures do not
+        // get stuck behind the "Loading conversation..." placeholder.
+        if (viewedConversationId) {
+          setLoadedConversationId(viewedConversationId)
+        } else if (sendConvId !== '__pending__') {
+          setLoadedConversationId(sendConvId)
+        }
+
         const apiError = toApiError(err)
         let description: string
         if (apiError.isNetworkError) {
@@ -341,16 +534,21 @@ export default function ChatWindow({
   }
 
   const handleNewConversation = useCallback(async () => {
-    if (!attackResultId) { return }
+    if (!attackResultId || isMutationLocked) { return }
 
     try {
       const response = await attacksApi.createConversation(attackResultId, {})
       onSelectConversation(response.conversation_id)
-      setIsPanelOpen(true)
+      setIsPanelOpen(!isNarrowScreen)
     } catch {
       // Silently fail
     }
-  }, [attackResultId, onSelectConversation])
+  }, [
+    attackResultId,
+    isNarrowScreen,
+    isMutationLocked,
+    onSelectConversation,
+  ])
 
   // -------------------------------------------------------------------
   // Message action handlers (4 buttons on each assistant message)
@@ -370,14 +568,14 @@ export default function ChatWindow({
 
   /** 2. Create a new conversation in the same attack and copy ONLY this message to its input box */
   const handleCopyToNewConversation = useCallback(async (messageIndex: number) => {
-    if (!attackResultId) { return }
+    if (!attackResultId || isMutationLocked) { return }
     const msg = messages[messageIndex]
     if (!msg) { return }
 
     try {
       const response = await attacksApi.createConversation(attackResultId, {})
       onSelectConversation(response.conversation_id)
-      setIsPanelOpen(true)
+      setIsPanelOpen(!isNarrowScreen)
       // Small delay so the panel/messages update first
       setTimeout(() => {
         if (msg.content) inputBoxRef.current?.setText(msg.content)
@@ -391,11 +589,23 @@ export default function ChatWindow({
       // If creating fails, fall back to current conversation
       if (msg.content) inputBoxRef.current?.setText(msg.content)
     }
-  }, [attackResultId, messages, onSelectConversation])
+  }, [
+    attackResultId,
+    isNarrowScreen,
+    isMutationLocked,
+    messages,
+    onSelectConversation,
+  ])
 
   /** 3. Branch into a new conversation within the same attack (clone up to clicked message) */
   const handleBranchConversation = useCallback(async (messageIndex: number) => {
-    if (!attackResultId || !activeConversationId) { return }
+    if (
+      !attackResultId
+      || !activeConversationId
+      || isMutationLocked
+    ) {
+      return
+    }
 
     try {
       const response = await attacksApi.createConversation(attackResultId, {
@@ -403,7 +613,7 @@ export default function ChatWindow({
         cutoff_index: messageIndex,
       })
       onSelectConversation(response.conversation_id)
-      setIsPanelOpen(true)
+      setIsPanelOpen(!isNarrowScreen)
       // Load the cloned messages
       const messagesResp = await attacksApi.getMessages(attackResultId, response.conversation_id)
       const frontendMessages = backendMessagesToFrontend(messagesResp.messages)
@@ -411,7 +621,13 @@ export default function ChatWindow({
     } catch (err) {
       console.error('Failed to branch into new conversation:', err)
     }
-  }, [attackResultId, activeConversationId, onSelectConversation])
+  }, [
+    attackResultId,
+    activeConversationId,
+    isNarrowScreen,
+    isMutationLocked,
+    onSelectConversation,
+  ])
 
   /** 4. Branch into a brand-new attack (clone up to clicked message with new labels) */
   const handleBranchAttack = useCallback(async (messageIndex: number) => {
@@ -436,7 +652,12 @@ export default function ChatWindow({
   }, [activeTarget, activeConversationId, labels, onConversationCreated])
 
   const handleChangeMainConversation = useCallback(async (convId: string) => {
-    if (!attackResultId) { return }
+    if (
+      !attackResultId
+      || isMutationLocked
+    ) {
+      return
+    }
 
     try {
       await attacksApi.changeMainConversation(attackResultId, convId)
@@ -444,28 +665,12 @@ export default function ChatWindow({
     } catch (err) {
       console.error('Failed to change main conversation:', err)
     }
-  }, [attackResultId])
+  }, [
+    attackResultId,
+    isMutationLocked,
+  ])
 
-  const singleTurnLimitReached = activeTarget?.supports_multi_turn === false && messages.some(m => m.role === 'user')
-
-  // Operator locking: if the loaded attack's operator differs from the current
-  // user's operator label, the conversation should be read-only.
-  const currentOperator = labels?.operator
-  const attackOperator = attackLabels?.operator
-  const isOperatorLocked = Boolean(
-    attackResultId && attackLabels && attackOperator && currentOperator && attackOperator !== currentOperator
-  )
-
-  // Cross-target guard: if viewing a historical attack whose target differs
-  // from the currently configured target, prevent sending new messages.
-  // The user can "Continue with your target" to branch into a new attack with their target.
-  const isCrossTargetLocked = Boolean(
-    attackResultId && attackTarget && activeTarget && (
-      attackTarget.target_type !== activeTarget.target_type ||
-      (attackTarget.endpoint ?? '') !== (activeTarget.endpoint ?? '') ||
-      (attackTarget.model_name ?? '') !== (activeTarget.model_name ?? '')
-    )
-  )
+  const singleTurnLimitReached = activeTarget?.capabilities?.supports_multi_turn === false && messages.some(m => m.role === 'user')
 
   // "Continue with your target" — clone the current conversation into a new attack
   const handleUseAsTemplate = useCallback(async () => {
@@ -497,8 +702,26 @@ export default function ChatWindow({
     }
   }, [attackResultId, activeTarget, activeConversationId, messages, labels, onConversationCreated])
 
+  const systemMessage = messages.find(message => message.role === 'system')
+
+  // Export is available whenever there is a stable, viewable conversation:
+  // not while empty, loading, or mid-send. A lone system prompt (rendered only
+  // in the banner, not the chat body) does not count as an exportable message.
+  // Read-only / operator-lock / cross-target states do not block export.
+  const canExportConversation =
+    messages.some((message) => !message.isLoading && message.role !== 'system') &&
+    !isSending &&
+    !isLoadingAttack &&
+    !isLoadingMessages &&
+    !awaitingConversationLoad
+
+  const handleExport = (format: ExportFormat) => {
+    exportConversation({ messages, conversationId: activeConversationId ?? conversationId, format })
+  }
+
   return (
     <div className={styles.root}>
+      <h1 className={styles.pageHeading}>Chat</h1>
       {isConverterPanelOpen && (
         <ConverterPanel
           onClose={() => setIsConverterPanelOpen(false)}
@@ -510,20 +733,11 @@ export default function ChatWindow({
           }}
         />
       )}
-      <div className={styles.chatArea}>
+      <div className={styles.chatArea} data-testid="chat-area">
         <div className={styles.ribbon}>
           <div className={styles.conversationInfo}>
-            <Text>PyRIT Attack</Text>
             {activeTarget ? (
-              <div className={styles.targetInfo}>
-                <Text size={200}>→</Text>
-                <Tooltip content={activeTarget.target_registry_name} relationship="label">
-                  <Badge appearance="outline" size="medium">
-                    {activeTarget.target_type}
-                    {activeTarget.model_name ? ` (${activeTarget.model_name})` : ''}
-                  </Badge>
-                </Tooltip>
-              </div>
+              <TargetBadge target={activeTarget} />
             ) : (
               <Text size={200} className={styles.noTarget}>
                 No target selected
@@ -534,26 +748,68 @@ export default function ChatWindow({
             )}
           </div>
           <div className={styles.ribbonActions}>
-            <Tooltip content="Toggle conversations panel" relationship="label">
-              <Button
-                appearance="subtle"
-                icon={<PanelRightRegular />}
-                onClick={() => setIsPanelOpen(!isPanelOpen)}
-                disabled={!attackResultId}
-                data-testid="toggle-panel-btn"
+            <Tooltip content="Render all messages as Markdown by default" relationship="label">
+              <Switch
+                checked={globalMarkdown}
+                onChange={handleMarkdownChange}
+                label="Markdown"
+                data-testid="global-markdown-toggle"
               />
             </Tooltip>
-            <Button
-              appearance="primary"
-              icon={<AddRegular />}
-              onClick={() => { setIsPanelOpen(false); onNewAttack() }}
-              disabled={!attackResultId}
-              data-testid="new-attack-btn"
-            >
-              New Attack
-            </Button>
+            <Menu>
+              <MenuTrigger disableButtonEnhancement>
+                <Tooltip content="Export conversation" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    className={styles.ribbonAction}
+                    icon={<ArrowDownloadRegular />}
+                    disabled={!canExportConversation}
+                    aria-label="Export conversation"
+                    data-testid="export-conversation-btn"
+                  />
+                </Tooltip>
+              </MenuTrigger>
+              <MenuPopover>
+                <MenuList>
+                  <MenuItem onClick={() => handleExport('markdown')} data-testid="export-markdown-item">
+                    Export as Markdown (.md)
+                  </MenuItem>
+                  <MenuItem onClick={() => handleExport('json')} data-testid="export-json-item">
+                    Export as JSON (.json)
+                  </MenuItem>
+                </MenuList>
+              </MenuPopover>
+            </Menu>
+            <Tooltip content="Toggle conversations panel" relationship="label">
+              <Button
+                {...restoreFocusTargetAttributes}
+                appearance="subtle"
+                className={styles.ribbonAction}
+                icon={<PanelRightRegular />}
+                onClick={() => setIsPanelOpen((open) => !open)}
+                disabled={!attackResultId}
+                data-testid="toggle-panel-btn"
+                aria-label="Toggle conversations panel"
+                aria-expanded={isPanelOpen}
+                aria-controls="conversation-panel"
+              />
+            </Tooltip>
+            <Tooltip content="New Attack" relationship="label">
+              <Button
+                appearance="primary"
+                icon={<AddRegular />}
+                onClick={() => { setIsPanelOpen(false); onNewAttack() }}
+                disabled={!attackResultId}
+                data-testid="new-attack-btn"
+                aria-label="New Attack"
+                className={styles.newAttackButton}
+              >
+                <span className={styles.newAttackLabel}>New Attack</span>
+              </Button>
+            </Tooltip>
           </div>
         </div>
+        {systemMessage && <SystemPromptBanner content={systemMessage.content} />}
         <MessageList
           messages={messages}
           onCopyToInput={handleCopyToInput}
@@ -561,20 +817,33 @@ export default function ChatWindow({
           onBranchConversation={attackResultId && activeConversationId ? handleBranchConversation : undefined}
           onBranchAttack={activeTarget && activeConversationId ? handleBranchAttack : undefined}
           isLoading={isLoadingAttack || isLoadingMessages || awaitingConversationLoad}
-          isSingleTurn={activeTarget?.supports_multi_turn === false}
+          isSingleTurn={activeTarget?.capabilities?.supports_multi_turn === false}
           isOperatorLocked={isOperatorLocked}
-          isCrossTarget={isCrossTargetLocked}
+          isCrossTarget={isCrossTargetLocked || isTargetResolutionLocked}
           noTargetSelected={!activeTarget}
+          globalMarkdown={globalMarkdown}
         />
         <ChatInputArea
           ref={inputBoxRef}
           onSend={handleSend}
-          disabled={isSending || !activeTarget || singleTurnLimitReached || isOperatorLocked || isCrossTargetLocked}
+          showSystemPrompt={!attackResultId}
+          supportsSystemPrompt={supportsSystemPrompt}
+          systemPrompt={systemPrompt}
+          onSystemPromptChange={setSystemPrompt}
+          disabled={
+            isSending
+            || !activeTarget
+            || isLoadingAttack
+            || singleTurnLimitReached
+            || isMutationLocked
+          }
           activeTarget={activeTarget}
           singleTurnLimitReached={singleTurnLimitReached}
           onNewConversation={handleNewConversation}
           operatorLocked={isOperatorLocked}
           crossTargetLocked={isCrossTargetLocked}
+          targetResolutionStatus={targetResolutionStatus}
+          onRetryTargetResolution={onRetryTargetResolution}
           onUseAsTemplate={handleUseAsTemplate}
           attackOperator={isOperatorLocked ? attackOperator ?? undefined : undefined}
           noTargetSelected={!activeTarget}
@@ -583,17 +852,29 @@ export default function ChatWindow({
           isConverterPanelOpen={isConverterPanelOpen}
           onInputChange={setChatInputText}
           onAttachmentsChange={handleAttachmentsChange}
-          convertedValue={pieceConversions['text']?.convertedValue ?? null}
-          originalValue={pieceConversions['text']?.originalValue ?? null}
+          convertedValue={activePieceConversions['text']?.convertedDataType === 'text' ? (activePieceConversions['text']?.convertedValue ?? null) : null}
+          originalValue={activePieceConversions['text']?.originalValue ?? null}
           onClearConversion={() => setPieceConversions((prev) => { const next = { ...prev }; delete next['text']; return next })}
           onConvertedValueChange={(val) => setPieceConversions((prev) => {
             const existing = prev['text']
             if (!existing) return prev
             return { ...prev, text: { ...existing, convertedValue: val } }
           })}
-          mediaConversions={Object.entries(pieceConversions)
+          convertedFileChip={(() => {
+            const tc = activePieceConversions['text']
+            if (!tc || tc.convertedDataType === 'text') return null
+            if (!isPathDataType(tc.convertedDataType)) return null
+            return {
+              name: basenameFromValue(tc.convertedValue, 'output'),
+              url: buildMediaUrl(tc.convertedValue),
+              iconKind: dataTypeToAttachmentKind(tc.convertedDataType),
+            }
+          })()}
+          onClearConvertedFileChip={() => setPieceConversions((prev) => { const next = { ...prev }; delete next['text']; return next })}
+          converterOutputDataTypes={Object.values(activePieceConversions).map((c) => c.convertedDataType)}
+          mediaConversions={Object.entries(activePieceConversions)
             .filter(([k]) => k !== 'text')
-            .map(([k, v]) => ({ pieceType: k, convertedValue: v.convertedValue }))}
+            .map(([k, v]) => ({ pieceType: k, convertedValue: v.convertedValue, convertedDataType: v.convertedDataType }))}
           onClearMediaConversion={(pieceType) => setPieceConversions((prev) => {
             const next = { ...prev }
             delete next[pieceType]
@@ -601,7 +882,20 @@ export default function ChatWindow({
           })}
         />
       </div>
-      {isPanelOpen && (
+      <Drawer
+        as="aside"
+        {...restoreFocusSourceAttributes}
+        type={isNarrowScreen ? 'overlay' : 'inline'}
+        position="end"
+        separator
+        open={isPanelOpen}
+        onOpenChange={(_, { open }) => setIsPanelOpen(open)}
+        className={mergeClasses(
+          styles.conversationDrawer,
+          isNarrowScreen && styles.narrowConversationDrawer,
+        )}
+        aria-label="Attack Conversations"
+      >
         <ConversationPanel
           attackResultId={attackResultId}
           activeConversationId={activeConversationId}
@@ -613,11 +907,12 @@ export default function ChatWindow({
             !activeTarget ? 'Configure a target to enable this action.'
             : isOperatorLocked ? 'Cannot modify — attack belongs to a different operator.'
             : isCrossTargetLocked ? 'Cannot modify — attack was created with a different target.'
+            : isTargetResolutionLocked ? 'Cannot modify — the attack target could not be safely resolved.'
             : undefined
           }
           refreshKey={panelRefreshKey}
         />
-      )}
+      </Drawer>
     </div>
   )
 }

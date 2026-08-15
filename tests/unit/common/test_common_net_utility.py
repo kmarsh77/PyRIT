@@ -28,7 +28,6 @@ def test_get_httpx_client_type(use_async, expected_type):
 
 
 @respx.mock
-@pytest.mark.asyncio
 async def test_make_request_and_raise_if_error_success():
     url = "http://testserver/api/test"
     method = "GET"
@@ -40,7 +39,6 @@ async def test_make_request_and_raise_if_error_success():
 
 
 @respx.mock
-@pytest.mark.asyncio
 async def test_make_request_and_raise_if_error_failure():
     url = "http://testserver/api/fail"
     method = "GET"
@@ -55,7 +53,6 @@ async def test_make_request_and_raise_if_error_failure():
 
 
 @respx.mock
-@pytest.mark.asyncio
 async def test_make_request_and_raise_if_error_retries():
     url = "http://testserver/api/retry"
     method = "GET"
@@ -78,11 +75,16 @@ async def test_make_request_and_raise_if_error_retries():
         assert mock_route.called
 
 
-@pytest.mark.asyncio
 async def test_debug_is_false_by_default():
     with patch("pyrit.common.net_utility.get_httpx_client") as mock_get_httpx_client:
-        mock_client_instance = MagicMock()
-        mock_get_httpx_client.return_value = mock_client_instance
+        mock_client_context = MagicMock()
+        mock_client = MagicMock()
+        mock_client.request = AsyncMock(
+            return_value=httpx.Response(status_code=200, request=httpx.Request("GET", "http://example.com"))
+        )
+        mock_client_context.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_context.__aexit__ = AsyncMock(return_value=None)
+        mock_get_httpx_client.return_value = mock_client_context
 
         await make_request_and_raise_if_error_async(endpoint_uri="http://example.com", method="GET")
 
@@ -162,7 +164,6 @@ def test_remove_url_parameters_complex():
 
 
 @respx.mock
-@pytest.mark.asyncio
 async def test_make_request_and_raise_if_error_preserves_blank_query_values():
     url = "http://testserver/api/test?api-version=&mode=test"
     mock_route = respx.get(url).respond(200, json={"status": "ok"})
@@ -175,7 +176,6 @@ async def test_make_request_and_raise_if_error_preserves_blank_query_values():
 
 
 @respx.mock
-@pytest.mark.asyncio
 async def test_make_request_and_raise_if_error_preserves_empty_query_values():
     url = "http://testserver/api/test"
     route = respx.get(url).respond(200, json={"status": "ok"})

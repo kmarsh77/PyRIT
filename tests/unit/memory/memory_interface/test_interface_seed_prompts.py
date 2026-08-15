@@ -4,10 +4,11 @@
 import os
 import tempfile
 from collections.abc import Sequence
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from pyrit.memory import MemoryInterface
 from pyrit.models import MessagePiece, SeedDataset, SeedGroup, SeedObjective, SeedPrompt
@@ -20,7 +21,6 @@ def assert_original_value_in_list(original_value: str, message_pieces: Sequence[
     raise AssertionError(f"Original value {original_value} not found in list")
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_audio(sqlite_instance: MemoryInterface):
     """Test adding and retrieving seed prompts with an audio file."""
     temp_files = []
@@ -49,7 +49,6 @@ async def test_get_seeds_with_audio(sqlite_instance: MemoryInterface):
                 os.remove(file_path)
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_video(sqlite_instance: MemoryInterface):
     """Test adding and retrieving seed prompts with a video file."""
     temp_files = []
@@ -78,7 +77,6 @@ async def test_get_seeds_with_video(sqlite_instance: MemoryInterface):
                 os.remove(file_path)
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_image(sqlite_instance: MemoryInterface):
     """Test adding and retrieving seed prompts with an image file."""
     temp_files = []
@@ -108,7 +106,6 @@ async def test_get_seeds_with_image(sqlite_instance: MemoryInterface):
                 os.remove(file_path)
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_value_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="dataset1", data_type="text"),
@@ -121,7 +118,6 @@ async def test_get_seeds_with_value_filter(sqlite_instance: MemoryInterface):
     assert result[0].value == "prompt1"
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_dataset_name_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="dataset1", data_type="text"),
@@ -134,7 +130,6 @@ async def test_get_seeds_with_dataset_name_filter(sqlite_instance: MemoryInterfa
     assert result[0].dataset_name == "dataset1"
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_dataset_name_pattern_startswith(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="harm_category_1", data_type="text"),
@@ -148,7 +143,6 @@ async def test_get_seeds_with_dataset_name_pattern_startswith(sqlite_instance: M
     assert all(seed.dataset_name.startswith("harm") for seed in result)
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_dataset_name_pattern_contains(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="test_harm_dataset", data_type="text"),
@@ -162,7 +156,6 @@ async def test_get_seeds_with_dataset_name_pattern_contains(sqlite_instance: Mem
     assert all("harm" in seed.dataset_name for seed in result)
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_dataset_name_pattern_endswith(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="dataset_test", data_type="text"),
@@ -176,7 +169,6 @@ async def test_get_seeds_with_dataset_name_pattern_endswith(sqlite_instance: Mem
     assert all(seed.dataset_name.endswith("test") for seed in result)
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_dataset_name_takes_precedence_over_pattern(sqlite_instance: MemoryInterface):
     """Test that dataset_name exact match takes precedence over pattern matching"""
     seed_prompts = [
@@ -191,7 +183,6 @@ async def test_get_seeds_dataset_name_takes_precedence_over_pattern(sqlite_insta
     assert result[0].dataset_name == "harm_exact"
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_added_by_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="dataset1", added_by="user1", data_type="text"),
@@ -204,7 +195,6 @@ async def test_get_seeds_with_added_by_filter(sqlite_instance: MemoryInterface):
     assert result[0].added_by == "user1"
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_source_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="dataset1", source="source1", data_type="text"),
@@ -217,7 +207,6 @@ async def test_get_seeds_with_source_filter(sqlite_instance: MemoryInterface):
     assert result[0].source == "source1"
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_harm_categories_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", harm_categories=["category1"], data_type="text"),
@@ -230,7 +219,6 @@ async def test_get_seeds_with_harm_categories_filter(sqlite_instance: MemoryInte
     assert result[0].harm_categories == ["category1"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_authors_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", authors=["author1"], data_type="text"),
@@ -243,7 +231,6 @@ async def test_get_seeds_with_authors_filter(sqlite_instance: MemoryInterface):
     assert result[0].authors == ["author1"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_groups_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", groups=["group1"], data_type="text"),
@@ -256,7 +243,6 @@ async def test_get_seeds_with_groups_filter(sqlite_instance: MemoryInterface):
     assert result[0].groups == ["group1"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_parameters_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", parameters=["param1"], data_type="text"),
@@ -270,7 +256,6 @@ async def test_get_seeds_with_parameters_filter(sqlite_instance: MemoryInterface
     assert result[0].parameters == ["param1"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_metadata_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", data_type="text", metadata={"key1": "value1", "key2": "value2"}),
@@ -283,7 +268,6 @@ async def test_get_seeds_with_metadata_filter(sqlite_instance: MemoryInterface):
     assert result[0].metadata == {"key1": "value1", "key2": "value2"}
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_multiple_filters(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="dataset1", added_by="user1", data_type="text"),
@@ -297,7 +281,6 @@ async def test_get_seeds_with_multiple_filters(sqlite_instance: MemoryInterface)
     assert result[0].added_by == "user1"
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_empty_list_filters(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", harm_categories=["harm1"], authors=["author1"], data_type="text"),
@@ -309,7 +292,6 @@ async def test_get_seeds_with_empty_list_filters(sqlite_instance: MemoryInterfac
     assert len(result) == 2
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_single_element_list_filters(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", harm_categories=["category1"], authors=["author1"], data_type="text"),
@@ -323,7 +305,6 @@ async def test_get_seeds_with_single_element_list_filters(sqlite_instance: Memor
     assert result[0].authors == ["author1"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_multiple_elements_list_filters(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(
@@ -342,7 +323,6 @@ async def test_get_seeds_with_multiple_elements_list_filters(sqlite_instance: Me
     assert result[0].authors == ["author1", "author2"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_multiple_elements_list_filters_additional(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(
@@ -367,7 +347,6 @@ async def test_get_seeds_with_multiple_elements_list_filters_additional(sqlite_i
     assert result[0].authors == ["author1", "author3"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_substring_filters_harm_categories(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", harm_categories=["category1"], authors=["author1"], data_type="text"),
@@ -385,7 +364,6 @@ async def test_get_seeds_with_substring_filters_harm_categories(sqlite_instance:
     assert result[1].authors == ["author2"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_substring_filters_groups(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", groups=["group1"], data_type="text"),
@@ -403,7 +381,6 @@ async def test_get_seeds_with_substring_filters_groups(sqlite_instance: MemoryIn
     assert result[1].groups == ["group2"]
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_substring_filters_parameters(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", parameters=["param1"], data_type="text"),
@@ -424,7 +401,6 @@ async def test_get_seeds_with_substring_filters_parameters(sqlite_instance: Memo
     assert result[1].parameters == ["param2"]
 
 
-@pytest.mark.asyncio
 async def test_add_seed_prompts_to_memory_empty_list(sqlite_instance: MemoryInterface):
     prompts: Sequence[SeedPrompt] = []
     await sqlite_instance.add_seeds_to_memory_async(seeds=prompts, added_by="tester")
@@ -432,7 +408,6 @@ async def test_add_seed_prompts_to_memory_empty_list(sqlite_instance: MemoryInte
     assert len(stored_prompts) == 0
 
 
-@pytest.mark.asyncio
 async def test_add_seed_prompts_duplicate_entries_same_dataset(sqlite_instance: MemoryInterface):
     prompts: Sequence[SeedPrompt] = [
         SeedPrompt(value="prompt1", dataset_name="test_dataset", data_type="text"),
@@ -454,7 +429,6 @@ async def test_add_seed_prompts_duplicate_entries_same_dataset(sqlite_instance: 
     assert len(stored_prompts) == 3
 
 
-@pytest.mark.asyncio
 async def test_add_seed_prompts_duplicate_entries_different_datasets(sqlite_instance: MemoryInterface):
     prompts: Sequence[SeedPrompt] = [
         SeedPrompt(value="prompt1", dataset_name="test_dataset", data_type="text"),
@@ -480,7 +454,6 @@ def test_get_seed_dataset_names_empty(sqlite_instance: MemoryInterface):
     assert sqlite_instance.get_seed_dataset_names() == []
 
 
-@pytest.mark.asyncio
 async def test_get_seed_dataset_names_single(sqlite_instance: MemoryInterface):
     dataset_name = "test_dataset"
     seed_prompt = SeedPrompt(value="test_value", dataset_name=dataset_name, added_by="tester", data_type="text")
@@ -488,7 +461,6 @@ async def test_get_seed_dataset_names_single(sqlite_instance: MemoryInterface):
     assert sqlite_instance.get_seed_dataset_names() == [dataset_name]
 
 
-@pytest.mark.asyncio
 async def test_get_seed_dataset_names_single_dataset_multiple_entries(sqlite_instance: MemoryInterface):
     dataset_name = "test_dataset"
     seed_prompt1 = SeedPrompt(value="test_value", dataset_name=dataset_name, added_by="tester", data_type="text")
@@ -497,7 +469,6 @@ async def test_get_seed_dataset_names_single_dataset_multiple_entries(sqlite_ins
     assert sqlite_instance.get_seed_dataset_names() == [dataset_name]
 
 
-@pytest.mark.asyncio
 async def test_get_seed_dataset_names_multiple(sqlite_instance: MemoryInterface):
     dataset_names = [f"dataset_{i}" for i in range(5)]
     seed_prompts = [
@@ -509,7 +480,6 @@ async def test_get_seed_dataset_names_multiple(sqlite_instance: MemoryInterface)
     assert sorted(sqlite_instance.get_seed_dataset_names()) == sorted(dataset_names)
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_empty_list(sqlite_instance: MemoryInterface):
     prompt_group = SeedGroup(seeds=[SeedPrompt(value="Test prompt", added_by="tester", data_type="text", sequence=0)])
     prompt_group.seeds = []
@@ -517,7 +487,6 @@ async def test_add_seed_groups_to_memory_empty_list(sqlite_instance: MemoryInter
         await sqlite_instance.add_seed_groups_to_memory_async(prompt_groups=[prompt_group])
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_single_element(sqlite_instance: MemoryInterface):
     prompt = SeedPrompt(value="Test prompt", added_by="tester", data_type="text", sequence=0)
     prompt_group = SeedGroup(seeds=[prompt])
@@ -525,7 +494,6 @@ async def test_add_seed_groups_to_memory_single_element(sqlite_instance: MemoryI
     assert len(sqlite_instance.get_seeds()) == 1
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_multiple_elements(sqlite_instance: MemoryInterface):
     prompt1 = SeedPrompt(value="Test prompt 1", added_by="tester", data_type="text", sequence=0, role="user")
     prompt2 = SeedPrompt(value="Test prompt 2", added_by="tester", data_type="text", sequence=1, role="user")
@@ -535,14 +503,12 @@ async def test_add_seed_groups_to_memory_multiple_elements(sqlite_instance: Memo
     assert len(sqlite_instance.get_seed_groups()) == 1
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_no_elements(sqlite_instance: MemoryInterface):
     with pytest.raises(ValueError, match="SeedGroup cannot be empty."):
         prompt_group = SeedGroup(seeds=[])
         await sqlite_instance.add_seed_groups_to_memory_async(prompt_groups=[prompt_group])
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_single_element_no_added_by(sqlite_instance: MemoryInterface):
     prompt = SeedPrompt(value="Test prompt", data_type="text", sequence=0)
     prompt_group = SeedGroup(seeds=[prompt])
@@ -550,7 +516,6 @@ async def test_add_seed_groups_to_memory_single_element_no_added_by(sqlite_insta
         await sqlite_instance.add_seed_groups_to_memory_async(prompt_groups=[prompt_group])
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_multiple_elements_no_added_by(sqlite_instance: MemoryInterface):
     prompt1 = SeedPrompt(value="Test prompt 1", data_type="text", sequence=0, role="user")
     prompt2 = SeedPrompt(value="Test prompt 2", data_type="text", sequence=1, role="user")
@@ -559,7 +524,6 @@ async def test_add_seed_groups_to_memory_multiple_elements_no_added_by(sqlite_in
         await sqlite_instance.add_seed_groups_to_memory_async(prompt_groups=[prompt_group])
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_inconsistent_group_ids(sqlite_instance: MemoryInterface):
     prompt1 = SeedPrompt(value="Test prompt 1", added_by="tester", data_type="text", sequence=0, role="user")
     prompt2 = SeedPrompt(value="Test prompt 2", added_by="tester", data_type="text", sequence=1, role="user")
@@ -571,7 +535,6 @@ async def test_add_seed_groups_to_memory_inconsistent_group_ids(sqlite_instance:
         await sqlite_instance.add_seed_groups_to_memory_async(prompt_groups=[prompt_group])
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_single_element_with_added_by(sqlite_instance: MemoryInterface):
     prompt = SeedPrompt(value="Test prompt", added_by="tester", data_type="text", sequence=0)
     prompt_group = SeedGroup(seeds=[prompt])
@@ -579,7 +542,6 @@ async def test_add_seed_groups_to_memory_single_element_with_added_by(sqlite_ins
     assert len(sqlite_instance.get_seeds()) == 1
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_multiple_elements_with_added_by(sqlite_instance: MemoryInterface):
     prompt1 = SeedPrompt(value="Test prompt 1", added_by="tester", data_type="text", sequence=0, role="user")
     prompt2 = SeedPrompt(value="Test prompt 2", added_by="tester", data_type="text", sequence=1, role="user")
@@ -588,7 +550,6 @@ async def test_add_seed_groups_to_memory_multiple_elements_with_added_by(sqlite_
     assert len(sqlite_instance.get_seeds()) == 2
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_multiple_groups_with_added_by(sqlite_instance: MemoryInterface):
     prompt1 = SeedPrompt(value="Test prompt 1", added_by="tester", data_type="text", sequence=0, role="user")
     prompt2 = SeedPrompt(value="Test prompt 2", added_by="tester", data_type="text", sequence=1, role="user")
@@ -607,7 +568,6 @@ async def test_add_seed_groups_to_memory_multiple_groups_with_added_by(sqlite_in
     assert groups_from_memory[1].prompts[0].prompt_group_id == groups_from_memory[1].prompts[1].prompt_group_id
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_with_all_modalities(sqlite_instance: MemoryInterface):
     """Test adding multiple prompt groups with different modalities using temporary files."""
     temp_files = []
@@ -683,7 +643,6 @@ async def test_add_seed_groups_to_memory_with_all_modalities(sqlite_instance: Me
         temp_dir.cleanup()
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_to_memory_with_textimage_modalities(sqlite_instance: MemoryInterface):
     """Test adding multiple prompt groups with text and image modalities using temporary files."""
     temp_files = []
@@ -735,7 +694,6 @@ async def test_add_seed_groups_to_memory_with_textimage_modalities(sqlite_instan
         temp_dir.cleanup()
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_with_param_filters(sqlite_instance: MemoryInterface):
     template_value = "Test template {{ param1 }}"
     dataset_name = "dataset_1"
@@ -767,7 +725,6 @@ def test_get_seed_groups_empty(sqlite_instance: MemoryInterface):
     assert sqlite_instance.get_seed_groups() == []
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_with_dataset_name(sqlite_instance: MemoryInterface):
     dataset_name = "test_dataset"
     prompt_group = SeedGroup(
@@ -782,7 +739,6 @@ async def test_get_seed_groups_with_dataset_name(sqlite_instance: MemoryInterfac
     assert groups[0].prompts[0].dataset_name == dataset_name
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_with_dataset_name_pattern_startswith(sqlite_instance: MemoryInterface):
     groups_to_add = [
         SeedGroup(
@@ -822,7 +778,6 @@ async def test_get_seed_groups_with_dataset_name_pattern_startswith(sqlite_insta
     assert all(group.prompts[0].dataset_name.startswith("harm") for group in groups)
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_with_dataset_name_pattern_contains(sqlite_instance: MemoryInterface):
     groups_to_add = [
         SeedGroup(
@@ -866,7 +821,6 @@ async def test_get_seed_groups_with_dataset_name_pattern_contains(sqlite_instanc
     assert all("harm" in group.prompts[0].dataset_name for group in groups)
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_dataset_name_takes_precedence_over_pattern(sqlite_instance: MemoryInterface):
     """Test that dataset_name exact match takes precedence over pattern matching"""
     groups_to_add = [
@@ -893,7 +847,6 @@ async def test_get_seed_groups_dataset_name_takes_precedence_over_pattern(sqlite
     assert groups[0].prompts[0].dataset_name == "harm_exact"
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_with_multiple_filters(sqlite_instance: MemoryInterface):
     dataset_name = "dataset_1"
     data_types = ["text"]
@@ -925,7 +878,6 @@ async def test_get_seed_groups_with_multiple_filters(sqlite_instance: MemoryInte
     assert groups[0].prompts[0].added_by == added_by
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_multiple_groups(sqlite_instance: MemoryInterface):
     group1 = SeedGroup(
         seeds=[SeedPrompt(value="Prompt 1", dataset_name="dataset_1", added_by="user1", sequence=0, data_type="text")]
@@ -939,7 +891,6 @@ async def test_get_seed_groups_multiple_groups(sqlite_instance: MemoryInterface)
     assert len(groups) == 2
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_multiple_groups_with_unique_ids(sqlite_instance: MemoryInterface):
     group1 = SeedGroup(
         seeds=[SeedPrompt(value="Prompt 1", dataset_name="dataset_1", added_by="user1", sequence=0, data_type="text")]
@@ -955,7 +906,6 @@ async def test_get_seed_groups_multiple_groups_with_unique_ids(sqlite_instance: 
     assert groups[0].prompts[0].prompt_group_id != groups[1].prompts[0].prompt_group_id
 
 
-@pytest.mark.asyncio
 async def test_get_seeds_by_hash(sqlite_instance: MemoryInterface):
     entries = [
         SeedPrompt(value="Hello 1", data_type="text"),
@@ -972,24 +922,22 @@ async def test_get_seeds_by_hash(sqlite_instance: MemoryInterface):
     assert retrieved_entries[0].value_sha256 == hello_1_hash
 
 
-@pytest.mark.asyncio
 async def test_add_seed_prompts_no_serialization_for_text(sqlite_instance: MemoryInterface):
     """Test that text prompts don't go through serialization"""
     text_prompt = SeedPrompt(value="Simple text prompt", dataset_name="test_dataset", data_type="text")
     original_value = text_prompt.value
 
-    # Mock the _serialize_seed_value method
-    with patch.object(sqlite_instance, "_serialize_seed_value") as mock_serialize:
+    # Mock the _serialize_seed_value_async method
+    with patch.object(sqlite_instance, "_serialize_seed_value_async") as mock_serialize:
         await sqlite_instance.add_seeds_to_memory_async(seeds=[text_prompt], added_by="test_user")
 
-        # Verify that _serialize_seed_value was NOT called for text
+        # Verify that _serialize_seed_value_async was NOT called for text
         mock_serialize.assert_not_called()
 
         # Verify that the prompt value was not changed
         assert text_prompt.value == original_value
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_with_objective_added_to_all_prompts(sqlite_instance: MemoryInterface):
     """Test objective is added to all_prompts list"""
     # Create prompts and objective
@@ -1026,7 +974,6 @@ async def test_add_seed_groups_with_objective_added_to_all_prompts(sqlite_instan
         assert objectives[0].value == "Test objective"
 
 
-@pytest.mark.asyncio
 async def test_add_seed_groups_without_objective_only_prompts_added(sqlite_instance: MemoryInterface):
     """Test when no objective, only prompts are added to all_prompts"""
     # Create prompts without objective
@@ -1056,7 +1003,6 @@ async def test_add_seed_groups_without_objective_only_prompts_added(sqlite_insta
         assert any(p.value == "Test prompt 2" for p in captured_prompts)
 
 
-@pytest.mark.asyncio
 async def test_add_seed_datasets_to_memory_async(sqlite_instance: MemoryInterface):
     """Test adding seed datasets to memory."""
     prompts = [SeedPrompt(value="test prompt", dataset_name="test_dataset", data_type="text")]
@@ -1070,7 +1016,6 @@ async def test_add_seed_datasets_to_memory_async(sqlite_instance: MemoryInterfac
     assert result[0].added_by == "test_user"
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_deduplication_and_filtering(sqlite_instance: MemoryInterface):
     """Test that get_seed_groups returns complete groups and deduplicates results."""
     temp_files = []
@@ -1119,7 +1064,6 @@ async def test_get_seed_groups_deduplication_and_filtering(sqlite_instance: Memo
         temp_dir.cleanup()
 
 
-@pytest.mark.asyncio
 async def test_get_seed_groups_filter_by_count(sqlite_instance: MemoryInterface):
     # Create seed prompts
     prompt1 = SeedPrompt(value="prompt1", dataset_name="test_dataset", data_type="text")
@@ -1158,3 +1102,116 @@ async def test_get_seed_groups_filter_by_count(sqlite_instance: MemoryInterface)
     # Test without filtering (should return all)
     all_groups = sqlite_instance.get_seed_groups()
     assert len(all_groups) == 2
+
+
+async def test_replace_seeds_for_dataset_async_replaces_all(sqlite_instance: MemoryInterface):
+    """replace_seeds_for_dataset_async swaps the target dataset's seeds and leaves others intact."""
+    await sqlite_instance.add_seeds_to_memory_async(
+        seeds=[
+            SeedPrompt(value="a1", dataset_name="alpha", data_type="text"),
+            SeedPrompt(value="a2", dataset_name="alpha", data_type="text"),
+            SeedPrompt(value="b1", dataset_name="beta", data_type="text"),
+        ],
+        added_by="seeding",
+    )
+
+    deleted = await sqlite_instance.replace_seeds_for_dataset_async(
+        dataset_name="alpha",
+        seeds=[SeedPrompt(value="a3", dataset_name="alpha", data_type="text")],
+        added_by="refresh",
+    )
+
+    assert deleted == 2
+    assert {seed.value for seed in sqlite_instance.get_seeds(dataset_name="alpha")} == {"a3"}
+    assert {seed.value for seed in sqlite_instance.get_seeds(dataset_name="beta")} == {"b1"}
+
+
+async def test_replace_seeds_for_dataset_async_new_dataset_inserts(sqlite_instance: MemoryInterface):
+    """Replacing a dataset with no existing rows simply inserts the new seeds and returns 0."""
+    deleted = await sqlite_instance.replace_seeds_for_dataset_async(
+        dataset_name="fresh",
+        seeds=[SeedPrompt(value="v1", dataset_name="fresh", data_type="text")],
+        added_by="refresh",
+    )
+
+    assert deleted == 0
+    assert {seed.value for seed in sqlite_instance.get_seeds(dataset_name="fresh")} == {"v1"}
+
+
+async def test_replace_seeds_for_dataset_async_empty_name_raises(sqlite_instance: MemoryInterface):
+    """An empty dataset_name is rejected to avoid an accidental mass delete."""
+    with pytest.raises(ValueError, match="dataset_name"):
+        await sqlite_instance.replace_seeds_for_dataset_async(
+            dataset_name="",
+            seeds=[SeedPrompt(value="v1", dataset_name="x", data_type="text")],
+            added_by="refresh",
+        )
+
+
+async def test_replace_seeds_for_dataset_async_empty_seeds_raises(sqlite_instance: MemoryInterface):
+    """Refusing empty seeds prevents replacing a dataset with nothing (i.e. wiping it)."""
+    with pytest.raises(ValueError, match="non-empty"):
+        await sqlite_instance.replace_seeds_for_dataset_async(dataset_name="alpha", seeds=[], added_by="refresh")
+
+
+async def test_replace_seeds_for_dataset_async_mismatched_name_raises(sqlite_instance: MemoryInterface):
+    """Seeds tagged for a different dataset are rejected before any delete, avoiding a cross-wipe."""
+    await sqlite_instance.add_seeds_to_memory_async(
+        seeds=[SeedPrompt(value="keep", dataset_name="alpha", data_type="text")],
+        added_by="seeding",
+    )
+
+    with pytest.raises(ValueError, match="mismatched"):
+        await sqlite_instance.replace_seeds_for_dataset_async(
+            dataset_name="alpha",
+            seeds=[SeedPrompt(value="foreign", dataset_name="beta", data_type="text")],
+            added_by="refresh",
+        )
+
+    # The guard fires before the delete, so alpha is untouched and beta was never created.
+    assert {seed.value for seed in sqlite_instance.get_seeds(dataset_name="alpha")} == {"keep"}
+    assert sqlite_instance.get_seeds(dataset_name="beta") == []
+
+
+async def test_replace_seeds_for_dataset_async_mixed_none_and_foreign_name_raises(sqlite_instance: MemoryInterface):
+    """A mix of a None dataset_name and a foreign one still raises ValueError (not TypeError)."""
+    await sqlite_instance.add_seeds_to_memory_async(
+        seeds=[SeedPrompt(value="keep", dataset_name="alpha", data_type="text")],
+        added_by="seeding",
+    )
+
+    seed_unnamed = SeedPrompt(value="unnamed", data_type="text")  # dataset_name defaults to None
+    seed_foreign = SeedPrompt(value="foreign", dataset_name="beta", data_type="text")
+
+    with pytest.raises(ValueError, match="mismatched"):
+        await sqlite_instance.replace_seeds_for_dataset_async(
+            dataset_name="alpha",
+            seeds=[seed_unnamed, seed_foreign],
+            added_by="refresh",
+        )
+
+    assert {seed.value for seed in sqlite_instance.get_seeds(dataset_name="alpha")} == {"keep"}
+
+
+async def test_replace_seeds_for_dataset_async_rolls_back_on_error(sqlite_instance: MemoryInterface):
+    """A failure during the replace rolls back the delete too, so existing seeds are preserved."""
+    await sqlite_instance.add_seeds_to_memory_async(
+        seeds=[SeedPrompt(value="old", dataset_name="d", data_type="text")],
+        added_by="seeding",
+    )
+
+    real_session = sqlite_instance.get_session()
+    real_session.commit = MagicMock(side_effect=SQLAlchemyError("commit failed"))
+    real_session.rollback = MagicMock(side_effect=real_session.rollback)
+
+    with patch.object(sqlite_instance, "get_session", return_value=real_session):
+        with pytest.raises(SQLAlchemyError, match="commit failed"):
+            await sqlite_instance.replace_seeds_for_dataset_async(
+                dataset_name="d",
+                seeds=[SeedPrompt(value="new", dataset_name="d", data_type="text")],
+                added_by="refresh",
+            )
+
+    real_session.rollback.assert_called_once()
+    # The delete was rolled back with the failed insert -> the original seed survives.
+    assert {seed.value for seed in sqlite_instance.get_seeds(dataset_name="d")} == {"old"}
