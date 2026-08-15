@@ -1,208 +1,352 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
 import json
 from collections.abc import Callable
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close
 
+from pyrit.memory import SQLiteMemory
 from pyrit.models import Message, MessagePiece
-from pyrit.prompt_target.websocket_target import WebsocketTarget
+from pyrit.prompt_target import WebsocketTarget
 
 
 @pytest.fixture
-def mock_initialization_strings() -> list[str]:
-    return ["connect_message", "authenticate_message"]
+def response_parser() -> Callable[[str | bytes], str | None]:
+    def parse_response(message: str | bytes) -> str | None:
+        if isinstance(message, bytes):
+            message = message.decode()
+        return json.loads(message).get("message")
+
+    return parse_response
 
 
 @pytest.fixture
-def mock_response_parser() -> Callable:
-    def response_parser(text: str):
-        json_body = json.loads(text)
-        if "message" in json_body:
-            return json_body["message"]
-        return None
+def message_builder() -> Callable[[str], str | bytes]:
+    def build_message(prompt: str) -> str:
+        return json.dumps({"message": prompt})
 
-    return response_parser
+    return build_message
 
 
 @pytest.fixture
-def mock_message_builder() -> Callable:
-    def message_builder(prompt: str):
-        message_format = f"""{{"message":"{{PROMPT}}"}}"""
-
-        return message_format.replace("{PROMPT}", prompt)
-
-    return message_builder
-
-
-@pytest.fixture
-def mock_websocket_target(
-    mock_initialization_strings, mock_response_parser, mock_message_builder, sqlite_instance
+def websocket_target(
+    response_parser: Callable[[str | bytes], str | None],
+    message_builder: Callable[[str], str | bytes],
+    sqlite_instance: SQLiteMemory,
 ) -> WebsocketTarget:
-    endpoint = "wss://example.com"
     return WebsocketTarget(
-        endpoint=endpoint,
-        initialization_strings=mock_initialization_strings,
-        response_parser=mock_response_parser,
-        message_builder=mock_message_builder,
+        endpoint="wss://example.com",
+        initialization_strings=["connect", "authenticate"],
+        response_parser=response_parser,
+        message_builder=message_builder,
+        discard_initial_messages=0,
     )
 
 
-@pytest.mark.asyncio
-async def test_connect_success(mock_websocket_target):
-    with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
-        await mock_websocket_target.connect()
-        mock_connect.assert_called_once_with(uri="wss://example.com")
-    await mock_websocket_target.cleanup_target()
+def create_message(*, value: str = "Hello", conversation_id: str = "conversation") -> Message:
+    return MessagePiece(
+        original_value=value,
+        original_value_data_type="text",
+        converted_value=value,
+        converted_value_data_type="text",
+        role="user",
+        conversation_id=conversation_id,
+    ).to_message()
 
 
-@pytest.mark.asyncio
-async def test_connect_success_w_kwargs():
-    with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
-        # Create target with websockets.connect() keyword argument "proxy"
-        target = WebsocketTarget(
-            endpoint="wss://example.com",
-            initialization_strings=mock_initialization_strings,
-            response_parser=mock_response_parser,
-            message_builder=mock_message_builder,
-            proxy="http://example.proxy.com",
+def test_init_invalid_endpoint_raises(
+    response_parser: Callable[[str | bytes], str | None],
+    message_builder: Callable[[str], str | bytes],
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    with pytest.raises(ValueError, match="endpoint must start"):
+        WebsocketTarget(
+            endpoint="https://example.com",
+            initialization_strings=[],
+            response_parser=response_parser,
+            message_builder=message_builder,
         )
-        await target.connect()
-        mock_connect.assert_called_once_with(uri="wss://example.com", proxy="http://example.proxy.com")
-    await target.cleanup_target()
+
+
+def test_init_invalid_discard_count_raises(
+    response_parser: Callable[[str | bytes], str | None],
+    message_builder: Callable[[str], str | bytes],
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    with pytest.raises(ValueError, match="must be nonnegative"):
+        WebsocketTarget(
+            endpoint="wss://example.com",
+            initialization_strings=[],
+            response_parser=response_parser,
+            message_builder=message_builder,
+            discard_initial_messages=-1,
+        )
+
+
+def test_init_invalid_timeout_raises(
+    response_parser: Callable[[str | bytes], str | None],
+    message_builder: Callable[[str], str | bytes],
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        WebsocketTarget(
+            endpoint="wss://example.com",
+            initialization_strings=[],
+            response_parser=response_parser,
+            message_builder=message_builder,
+            response_timeout_seconds=0,
+        )
 
 
 @pytest.mark.asyncio
-async def test_send_prompt_async(mock_websocket_target):
-    # Mock the necessary methods
-    mock_websocket_target.connect = AsyncMock(return_value=AsyncMock())
-    result = "Hi!"
-    mock_websocket_target.send_text_async = AsyncMock(return_value=result)
-
-    # Create a mock Message with a valid data type
-    message_piece = MessagePiece(
-        original_value="Hello",
-        original_value_data_type="text",
-        converted_value="Hello",
-        converted_value_data_type="text",
-        role="user",
-        conversation_id="test_conversation_id",
+async def test_connect_async_passes_websocket_arguments(
+    response_parser: Callable[[str | bytes], str | None],
+    message_builder: Callable[[str], str | bytes],
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    target = WebsocketTarget(
+        endpoint="wss://example.com",
+        initialization_strings=[],
+        response_parser=response_parser,
+        message_builder=message_builder,
+        proxy="http://proxy.example.com",
     )
-    message = Message(message_pieces=[message_piece])
+    connection = AsyncMock(spec=ClientConnection)
 
-    # Call the send_prompt_async method
-    response = await mock_websocket_target.send_prompt_async(message=message)
+    with patch(
+        "pyrit.prompt_target.websocket_target.websockets.connect",
+        new_callable=AsyncMock,
+        return_value=connection,
+    ) as mock_connect:
+        result = await target.connect_async()
 
-    assert len(response) == 1
-    assert response
-
-    mock_websocket_target.send_text_async.assert_called_once_with(
-        text="Hello",
-        conversation_id="test_conversation_id",
-    )
-    assert response[0].get_value() == "Hi!"
-
-    # Clean up the WebSocket connections
-    await mock_websocket_target.cleanup_target()
+    assert result is connection
+    mock_connect.assert_awaited_once_with(uri="wss://example.com", proxy="http://proxy.example.com")
 
 
 @pytest.mark.asyncio
-async def test_multiple_websockets_created_for_multiple_conversations(mock_websocket_target):
-    # Mock the necessary methods
-    mock_websocket_target.connect = AsyncMock(return_value=AsyncMock())
-    result = "event2"
-    mock_websocket_target.send_text_async = AsyncMock(return_value=result)
+async def test_send_prompt_async_initializes_connection_once(websocket_target: WebsocketTarget) -> None:
+    connection = AsyncMock(spec=ClientConnection)
 
-    # Create mock Messages for two different conversations
-    message_piece_1 = MessagePiece(
-        original_value="Hello",
-        original_value_data_type="text",
-        converted_value="Hello",
-        converted_value_data_type="text",
-        role="user",
-        conversation_id="conversation_1",
-    )
-    message_1 = Message(message_pieces=[message_piece_1])
+    with (
+        patch.object(websocket_target, "connect_async", new_callable=AsyncMock, return_value=connection) as connect,
+        patch.object(
+            websocket_target,
+            "send_text_async",
+            new_callable=AsyncMock,
+            side_effect=["First response", "Second response"],
+        ) as send_text,
+    ):
+        first_response = await websocket_target.send_prompt_async(
+            message=create_message(value="First", conversation_id="shared")
+        )
+        second_response = await websocket_target.send_prompt_async(
+            message=create_message(value="Second", conversation_id="shared")
+        )
 
-    message_piece_2 = MessagePiece(
-        original_value="Hi",
-        original_value_data_type="text",
-        converted_value="Hi",
-        converted_value_data_type="text",
-        role="user",
-        conversation_id="conversation_2",
-    )
-    message_2 = Message(message_pieces=[message_piece_2])
+    connect.assert_awaited_once()
+    assert connection.send.await_count == 2
+    assert [call.args[0] for call in connection.send.await_args_list] == ["connect", "authenticate"]
+    assert send_text.await_count == 2
+    assert first_response[0].get_value() == "First response"
+    assert second_response[0].get_value() == "Second response"
 
-    # Call the send_prompt_async method for both conversations
-    await mock_websocket_target.send_prompt_async(message=message_1)
-    await mock_websocket_target.send_prompt_async(message=message_2)
-
-    # Assert that two different WebSocket connections were created
-    assert "conversation_1" in mock_websocket_target._existing_conversation
-    assert "conversation_2" in mock_websocket_target._existing_conversation
-
-    # Clean up the WebSocket connections
-    await mock_websocket_target.cleanup_target()
-    assert mock_websocket_target._existing_conversation == {}
+    await websocket_target.cleanup_target_async()
 
 
 @pytest.mark.asyncio
-async def test_send_prompt_async_invalid_request(mock_websocket_target):
-    # Create a mock Message with an invalid data type
-    message_piece = MessagePiece(
-        original_value="Invalid",
+async def test_send_prompt_async_serializes_same_conversation(websocket_target: WebsocketTarget) -> None:
+    connection = AsyncMock(spec=ClientConnection)
+    active_requests = 0
+    maximum_active_requests = 0
+
+    async def send_text(*, text: str, conversation_id: str) -> str:
+        nonlocal active_requests, maximum_active_requests
+        active_requests += 1
+        maximum_active_requests = max(maximum_active_requests, active_requests)
+        await asyncio.sleep(0)
+        active_requests -= 1
+        return text
+
+    with (
+        patch.object(websocket_target, "connect_async", new_callable=AsyncMock, return_value=connection) as connect,
+        patch.object(websocket_target, "send_text_async", side_effect=send_text),
+    ):
+        await asyncio.gather(
+            websocket_target.send_prompt_async(message=create_message(value="First", conversation_id="shared")),
+            websocket_target.send_prompt_async(message=create_message(value="Second", conversation_id="shared")),
+        )
+
+    connect.assert_awaited_once()
+    assert maximum_active_requests == 1
+
+    await websocket_target.cleanup_target_async()
+
+
+@pytest.mark.asyncio
+async def test_send_prompt_async_failure_discards_connection(websocket_target: WebsocketTarget) -> None:
+    connection = AsyncMock(spec=ClientConnection)
+    websocket_target._existing_conversation["conversation"] = connection
+
+    with patch.object(
+        websocket_target,
+        "send_text_async",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("connection failed"),
+    ):
+        with pytest.raises(ConnectionError, match="connection failed"):
+            await websocket_target.send_prompt_async(message=create_message())
+
+    connection.close.assert_awaited_once()
+    assert "conversation" not in websocket_target._existing_conversation
+
+
+def test_validate_request_invalid_type_raises(websocket_target: WebsocketTarget) -> None:
+    message = MessagePiece(
+        original_value="image.png",
         original_value_data_type="image_path",
-        converted_value="Invalid",
+        converted_value="image.png",
         converted_value_data_type="image_path",
         role="user",
-    )
-    message = Message(message_pieces=[message_piece])
-    with pytest.raises(ValueError) as excinfo:
-        mock_websocket_target._validate_request(message=message)
+    ).to_message()
 
-    assert str(excinfo.value) == "This target only supports text prompt input. Received: image_path."
+    with pytest.raises(ValueError, match="supports only the following data types: text"):
+        websocket_target._validate_request(normalized_conversation=[message])
 
 
 @pytest.mark.asyncio
-async def test_receive_messages_connection_closed(mock_websocket_target):
-    """Test handling of WebSocket connection closing unexpectedly."""
-    mock_websocket = AsyncMock()
-    conversation_id = "test_connection_closed"
-    mock_websocket_target._existing_conversation[conversation_id] = mock_websocket
+async def test_receive_messages_async_ignores_unparsed_frames(websocket_target: WebsocketTarget) -> None:
+    connection = AsyncMock(spec=ClientConnection)
+    connection.__aiter__.return_value = [
+        json.dumps({"event": "progress"}),
+        json.dumps({"message": "response"}),
+    ]
+    websocket_target._existing_conversation["conversation"] = connection
 
-    # create Close objects for the rcvd and sent parameters
+    result = await websocket_target.receive_messages_async("conversation")
+
+    assert result == "response"
+
+
+@pytest.mark.asyncio
+async def test_receive_messages_async_propagates_parser_error(websocket_target: WebsocketTarget) -> None:
+    connection = AsyncMock(spec=ClientConnection)
+    connection.__aiter__.return_value = ["not-json"]
+    websocket_target._existing_conversation["conversation"] = connection
+
+    with pytest.raises(json.JSONDecodeError):
+        await websocket_target.receive_messages_async("conversation")
+
+
+@pytest.mark.asyncio
+async def test_receive_messages_async_propagates_connection_closed(websocket_target: WebsocketTarget) -> None:
+    connection = AsyncMock(spec=ClientConnection)
     close_frame = Close(1000, "Normal closure")
 
-    # forcing the websocket to raise a ConnectionClosed when iterated
     class FailingAsyncIterator:
-        def __aiter__(self):
+        def __aiter__(self) -> "FailingAsyncIterator":
             return self
 
-        async def __anext__(self):
+        async def __anext__(self) -> str:
             raise ConnectionClosed(rcvd=close_frame, sent=None)
 
-    mock_websocket.__aiter__.side_effect = lambda: FailingAsyncIterator()
-    result = await mock_websocket_target.receive_messages(conversation_id)
-    assert result == ""
+    connection.__aiter__.side_effect = lambda: FailingAsyncIterator()
+    websocket_target._existing_conversation["conversation"] = connection
+
+    with pytest.raises(ConnectionClosed):
+        await websocket_target.receive_messages_async("conversation")
 
 
 @pytest.mark.asyncio
-async def test_receive_messages_with_text(mock_websocket_target):
-    """Test successful processing of text message."""
-    mock_websocket = AsyncMock()
-    conversation_id = "test_success"
-    mock_websocket_target._existing_conversation[conversation_id] = mock_websocket
+async def test_send_text_async_timeout_raises(websocket_target: WebsocketTarget) -> None:
+    connection = AsyncMock(spec=ClientConnection)
+    websocket_target._existing_conversation["conversation"] = connection
+    websocket_target._response_timeout_seconds = 0.001
 
-    websocket_message = f"""{{"message":"test message"}}"""
+    async def wait_forever(conversation_id: str) -> str:
+        await asyncio.sleep(1)
+        return "unreachable"
 
-    # mock websocket to yield all events
-    mock_websocket.__aiter__.return_value = [websocket_message]
+    with patch.object(websocket_target, "receive_messages_async", side_effect=wait_forever):
+        with pytest.raises(TimeoutError, match="Timed out waiting for a WebSocket response"):
+            await websocket_target.send_text_async(text="Hello", conversation_id="conversation")
 
-    result = await mock_websocket_target.receive_messages(conversation_id)
 
-    assert result == "test message"
+@pytest.mark.asyncio
+async def test_cleanup_target_async_attempts_every_connection(websocket_target: WebsocketTarget) -> None:
+    failing_connection = AsyncMock(spec=ClientConnection)
+    failing_connection.close.side_effect = RuntimeError("close failed")
+    successful_connection = AsyncMock(spec=ClientConnection)
+    websocket_target._existing_conversation = {
+        "failing": failing_connection,
+        "successful": successful_connection,
+    }
+
+    with pytest.raises(ConnectionError, match="one or more"):
+        await websocket_target.cleanup_target_async()
+
+    failing_connection.close.assert_awaited_once()
+    successful_connection.close.assert_awaited_once()
+    assert websocket_target._existing_conversation == {"failing": failing_connection}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_target_async_waits_for_active_send(websocket_target: WebsocketTarget) -> None:
+    connection = AsyncMock(spec=ClientConnection)
+    websocket_target._existing_conversation["conversation"] = connection
+    send_started = asyncio.Event()
+    finish_send = asyncio.Event()
+
+    async def send_text(*, text: str, conversation_id: str) -> str:
+        send_started.set()
+        await finish_send.wait()
+        return text
+
+    with patch.object(websocket_target, "send_text_async", side_effect=send_text):
+        send_task = asyncio.create_task(websocket_target.send_prompt_async(message=create_message()))
+        await send_started.wait()
+        cleanup_task = asyncio.create_task(websocket_target.cleanup_target_async())
+        await asyncio.sleep(0)
+
+        connection.close.assert_not_awaited()
+        assert not cleanup_task.done()
+
+        finish_send.set()
+        await send_task
+        await cleanup_task
+
+    connection.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_target_async_cancellation_finishes_closing_connections(
+    websocket_target: WebsocketTarget,
+) -> None:
+    connection = AsyncMock(spec=ClientConnection)
+    websocket_target._existing_conversation["conversation"] = connection
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+
+    async def close_connection() -> None:
+        close_started.set()
+        await finish_close.wait()
+
+    connection.close.side_effect = close_connection
+    cleanup_task = asyncio.create_task(websocket_target.cleanup_target_async())
+    await close_started.wait()
+
+    cleanup_task.cancel()
+    await asyncio.sleep(0)
+    assert not cleanup_task.done()
+
+    finish_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup_task
+
+    assert websocket_target._existing_conversation == {}
