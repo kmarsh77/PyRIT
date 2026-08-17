@@ -3,11 +3,12 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import websockets
 from websockets.asyncio.client import ClientConnection
+from websockets.protocol import State
 
 from pyrit.exceptions import EmptyResponseException, pyrit_target_retry
 from pyrit.models import Message, construct_response_from_request
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 WebSocketMessage = str | bytes
 ResponseParser = Callable[[WebSocketMessage], str | None]
 MessageBuilder = Callable[[str], WebSocketMessage]
+ConversationRestoreCallback = Callable[[ClientConnection, list[Message]], Awaitable[None]]
 
 
 class WebsocketTarget(PromptTarget):
@@ -43,6 +45,7 @@ class WebsocketTarget(PromptTarget):
         initialization_strings: list[WebSocketMessage],
         response_parser: ResponseParser,
         message_builder: MessageBuilder,
+        conversation_restore_callback: ConversationRestoreCallback | None = None,
         discard_initial_messages: int = 1,
         response_timeout_seconds: float = RESPONSE_TIMEOUT_SECONDS,
         existing_convo: dict[str, ClientConnection] | None = None,
@@ -59,6 +62,10 @@ class WebsocketTarget(PromptTarget):
             response_parser (ResponseParser): Function that returns response text or ``None`` for
                 a frame that the target should ignore.
             message_builder (MessageBuilder): Function that converts prompt text to a WebSocket message.
+            conversation_restore_callback (ConversationRestoreCallback | None): Async function that restores
+                prior normalized messages on a replacement connection. A multi-turn conversation cannot
+                reconnect without this callback because the target cannot infer the service-specific protocol.
+                The callback must consume all frames produced by its restoration exchange.
             discard_initial_messages (int): Number of parsed messages to discard after initialization.
             response_timeout_seconds (float): Maximum time to wait for a parsed response.
             existing_convo (dict[str, ClientConnection] | None): Pre-initialized connections by
@@ -86,6 +93,7 @@ class WebsocketTarget(PromptTarget):
         self._initialization_strings = initialization_strings
         self._response_parser = response_parser
         self._message_builder = message_builder
+        self._conversation_restore_callback = conversation_restore_callback
         self._discard_initial_messages = discard_initial_messages
         self._response_timeout_seconds = response_timeout_seconds
         self._existing_conversation = existing_convo if existing_convo is not None else {}
@@ -99,7 +107,7 @@ class WebsocketTarget(PromptTarget):
         self._is_cleaning_up = False
         self._websockets_kwargs = websockets_kwargs
 
-    async def connect_async(self) -> ClientConnection:
+    async def _connect_async(self) -> ClientConnection:
         """
         Open a connection to the configured WebSocket endpoint.
 
@@ -111,7 +119,7 @@ class WebsocketTarget(PromptTarget):
         logger.info("Connected to WebSocket endpoint")
         return connection
 
-    async def send_message_async(self, *, message: WebSocketMessage, conversation_id: str) -> None:
+    async def _send_message_async(self, *, message: WebSocketMessage, conversation_id: str) -> None:
         """
         Send one message on an existing conversation connection.
 
@@ -122,7 +130,7 @@ class WebsocketTarget(PromptTarget):
         websocket = self._get_websocket(conversation_id=conversation_id)
         await websocket.send(message)
 
-    async def receive_messages_async(self, conversation_id: str) -> str:
+    async def _receive_messages_async(self, conversation_id: str) -> str:
         """
         Receive frames until the response parser returns text.
 
@@ -135,7 +143,7 @@ class WebsocketTarget(PromptTarget):
         websocket = self._get_websocket(conversation_id=conversation_id)
         return await self._receive_message_async(websocket=websocket)
 
-    async def send_text_async(self, *, text: str, conversation_id: str) -> str:
+    async def _send_text_async(self, *, text: str, conversation_id: str) -> str:
         """
         Send a text prompt and wait for its response.
 
@@ -149,16 +157,16 @@ class WebsocketTarget(PromptTarget):
         Raises:
             TimeoutError: If no parsed response arrives before the configured timeout.
         """
-        await self.send_message_async(
+        await self._send_message_async(
             message=self._message_builder(text),
             conversation_id=conversation_id,
         )
         try:
             return await asyncio.wait_for(
-                self.receive_messages_async(conversation_id),
+                self._receive_messages_async(conversation_id),
                 timeout=self._response_timeout_seconds,
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             raise TimeoutError(
                 f"Timed out waiting for a WebSocket response after {self._response_timeout_seconds} seconds."
             ) from None
@@ -193,18 +201,9 @@ class WebsocketTarget(PromptTarget):
         try:
             await self._active_requests_complete.wait()
             await self._close_all_connections_async()
-            self._conversation_locks.clear()
         finally:
+            self._conversation_locks.clear()
             await self._finish_cleanup_async()
-
-    def is_json_response_supported(self) -> bool:
-        """
-        Check whether the target supports JSON response mode.
-
-        Returns:
-            bool: Always ``False`` because the service-specific parser controls the response format.
-        """
-        return False
 
     @limit_requests_per_minute
     @pyrit_target_retry
@@ -228,12 +227,17 @@ class WebsocketTarget(PromptTarget):
                 raise ValueError(f"Unsupported response type: {request.converted_value_data_type}")
 
             conversation_id = request.conversation_id
+            if not conversation_id:
+                raise ValueError("WebsocketTarget requires a conversation_id on the message being sent.")
             conversation_lock = self._conversation_locks.setdefault(conversation_id, asyncio.Lock())
 
             async with conversation_lock:
                 try:
-                    await self._get_or_create_connection_async(conversation_id=conversation_id)
-                    result = await self.send_text_async(
+                    await self._get_or_create_connection_async(
+                        conversation_id=conversation_id,
+                        conversation_history=normalized_conversation[:-1],
+                    )
+                    result = await self._send_text_async(
                         text=request.converted_value,
                         conversation_id=conversation_id,
                     )
@@ -250,14 +254,36 @@ class WebsocketTarget(PromptTarget):
         ).message_pieces[0]
         return [Message(message_pieces=[response_piece])]
 
-    async def _get_or_create_connection_async(self, *, conversation_id: str) -> ClientConnection:
+    async def _get_or_create_connection_async(
+        self,
+        *,
+        conversation_id: str,
+        conversation_history: list[Message],
+    ) -> ClientConnection:
         existing_connection = self._existing_conversation.get(conversation_id)
-        if existing_connection is not None:
+        if existing_connection is not None and existing_connection.state is State.OPEN:
             return existing_connection
 
-        websocket = await self.connect_async()
+        if existing_connection is not None:
+            logger.info("Replacing closed WebSocket conversation: %s", conversation_id)
+            await self._discard_connection_async(conversation_id=conversation_id)
+
+        restore_callback = self._conversation_restore_callback
+        if conversation_history and restore_callback is None:
+            raise ConnectionError(
+                "The WebSocket connection must be replaced, but conversation history cannot be restored. "
+                "Configure conversation_restore_callback for multi-turn reconnection."
+            )
+
+        websocket = await self._connect_async()
         try:
             await self._initialize_connection_async(websocket=websocket)
+            if conversation_history and restore_callback is not None:
+                await self._restore_conversation_async(
+                    websocket=websocket,
+                    conversation_history=conversation_history,
+                    restore_callback=restore_callback,
+                )
         except BaseException:
             try:
                 await websocket.close()
@@ -267,6 +293,23 @@ class WebsocketTarget(PromptTarget):
 
         self._existing_conversation[conversation_id] = websocket
         return websocket
+
+    async def _restore_conversation_async(
+        self,
+        *,
+        websocket: ClientConnection,
+        conversation_history: list[Message],
+        restore_callback: ConversationRestoreCallback,
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                restore_callback(websocket, conversation_history),
+                timeout=self._response_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Timed out restoring WebSocket conversation history after {self._response_timeout_seconds} seconds."
+            ) from None
 
     async def _initialize_connection_async(self, *, websocket: ClientConnection) -> None:
         for initialization_string in self._initialization_strings:
@@ -278,7 +321,7 @@ class WebsocketTarget(PromptTarget):
                     self._receive_message_async(websocket=websocket),
                     timeout=self._response_timeout_seconds,
                 )
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 raise TimeoutError(
                     "Timed out waiting for an initial WebSocket message after "
                     f"{self._response_timeout_seconds} seconds."
@@ -350,12 +393,12 @@ class WebsocketTarget(PromptTarget):
 
         first_error: BaseException | None = None
         for (conversation_id, websocket), close_result in zip(connections, close_results, strict=True):
+            if self._existing_conversation.get(conversation_id) is websocket:
+                del self._existing_conversation[conversation_id]
             if isinstance(close_result, BaseException):
                 logger.error("Failed to close WebSocket conversation %s: %s", conversation_id, close_result)
                 first_error = first_error or close_result
                 continue
-            if self._existing_conversation.get(conversation_id) is websocket:
-                del self._existing_conversation[conversation_id]
             logger.info("Disconnected WebSocket conversation: %s", conversation_id)
 
         if cancellation_error is not None:

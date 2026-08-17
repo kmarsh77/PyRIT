@@ -19,14 +19,16 @@
 
 # %%
 import json
+import uuid
 
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection, serve
 
-from pyrit.models import MessagePiece
+from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target import WebsocketTarget
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
-await initialize_pyrit_async(memory_db_type=IN_MEMORY)  # type: ignore
+await initialize_pyrit_async(memory_db_type=IN_MEMORY, load_defaults=False, silent=True)  # type: ignore
 
 
 async def pyrit_websocket_handler(websocket: ServerConnection) -> None:
@@ -39,6 +41,10 @@ async def pyrit_websocket_handler(websocket: ServerConnection) -> None:
 
     async for raw_message in websocket:
         request = json.loads(raw_message)
+        if request["type"] == "restore":
+            await websocket.send(json.dumps({"type": "restored"}))
+            continue
+
         await websocket.send(json.dumps({"event": "processing"}))
         await websocket.send(json.dumps({"message": f"PyRIT received: {request['prompt']}"}))
 
@@ -53,8 +59,28 @@ def message_builder(prompt: str) -> str:
     return json.dumps({"type": "prompt", "prompt": prompt})
 
 
+async def restore_conversation_async(
+    websocket: ClientConnection,
+    conversation_history: list[Message],
+) -> None:
+    history = [
+        {
+            "role": message.message_pieces[0].role,
+            "content": message.get_value(),
+        }
+        for message in conversation_history
+    ]
+    await websocket.send(json.dumps({"type": "restore", "history": history}))
+    acknowledgement = json.loads(await websocket.recv())
+    if acknowledgement != {"type": "restored"}:
+        raise ConnectionError("The WebSocket service did not restore the conversation.")
+
+
 # %% [markdown]
 # Start the local service on an available loopback port, then configure the target for its protocol.
+#
+# The restore callback is service-specific. PyRIT calls it when a multi-turn conversation needs a
+# replacement connection. Without this callback, the target fails instead of silently losing history.
 
 # %%
 server = await serve(pyrit_websocket_handler, "127.0.0.1", 0)  # type: ignore
@@ -65,6 +91,7 @@ target = WebsocketTarget(
     initialization_strings=[json.dumps({"type": "initialize", "client": "PyRIT"})],
     response_parser=response_parser,
     message_builder=message_builder,
+    conversation_restore_callback=restore_conversation_async,
     discard_initial_messages=1,
 )
 
@@ -76,6 +103,7 @@ request = MessagePiece(
     role="user",
     original_value="Hello",
     original_value_data_type="text",
+    conversation_id=str(uuid.uuid4()),
 ).to_message()
 
 try:
