@@ -13,6 +13,7 @@
 #
 # `WebsocketTarget` connects PyRIT to services that use a custom WebSocket protocol.
 # Supply the service-specific initialization messages, prompt builder, and response parser.
+# The `protocol_identifier` is a non-secret name for this complete protocol configuration.
 #
 # This example starts a local PyRIT WebSocket service. It exercises the real WebSocket
 # transport without credentials or an external endpoint.
@@ -88,6 +89,7 @@ port = server.sockets[0].getsockname()[1]
 
 target = WebsocketTarget(
     endpoint=f"ws://127.0.0.1:{port}",
+    protocol_identifier="local-pyrit-echo-v1",
     initialization_strings=[json.dumps({"type": "initialize", "client": "PyRIT"})],
     response_parser=response_parser,
     message_builder=message_builder,
@@ -97,6 +99,9 @@ target = WebsocketTarget(
 
 # %% [markdown]
 # Send a prompt through the target and close both sides of the connection.
+#
+# Cleanup is terminal for this target instance. If a connection fails while a prompt is in
+# progress, the target discards that connection and raises the error instead of retrying the prompt.
 
 # %%
 request = MessagePiece(

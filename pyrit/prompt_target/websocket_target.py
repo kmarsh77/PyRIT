@@ -5,13 +5,14 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+from weakref import WeakValueDictionary
 
 import websockets
 from websockets.asyncio.client import ClientConnection
 from websockets.protocol import State
 
 from pyrit.exceptions import EmptyResponseException, pyrit_target_retry
-from pyrit.models import Message, construct_response_from_request
+from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target import PromptTarget, limit_requests_per_minute
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
@@ -42,6 +43,7 @@ class WebsocketTarget(PromptTarget):
         self,
         *,
         endpoint: str,
+        protocol_identifier: str,
         initialization_strings: list[WebSocketMessage],
         response_parser: ResponseParser,
         message_builder: MessageBuilder,
@@ -58,6 +60,8 @@ class WebsocketTarget(PromptTarget):
 
         Args:
             endpoint (str): WebSocket endpoint. Must use the ``ws://`` or ``wss://`` scheme.
+            protocol_identifier (str): Non-secret name that uniquely identifies the service protocol
+                and callback behavior.
             initialization_strings (list[str | bytes]): Messages to send when a connection opens.
             response_parser (ResponseParser): Function that returns response text or ``None`` for
                 a frame that the target should ignore.
@@ -79,6 +83,8 @@ class WebsocketTarget(PromptTarget):
         """
         if not endpoint.startswith(("ws://", "wss://")):
             raise ValueError("endpoint must start with 'ws://' or 'wss://'.")
+        if not protocol_identifier.strip():
+            raise ValueError("protocol_identifier must not be empty.")
         if discard_initial_messages < 0:
             raise ValueError("discard_initial_messages must be nonnegative.")
         if response_timeout_seconds <= 0:
@@ -90,6 +96,7 @@ class WebsocketTarget(PromptTarget):
             custom_configuration=custom_configuration,
         )
 
+        self._protocol_identifier = protocol_identifier
         self._initialization_strings = initialization_strings
         self._response_parser = response_parser
         self._message_builder = message_builder
@@ -97,15 +104,19 @@ class WebsocketTarget(PromptTarget):
         self._discard_initial_messages = discard_initial_messages
         self._response_timeout_seconds = response_timeout_seconds
         self._existing_conversation = existing_convo if existing_convo is not None else {}
-        self._conversation_locks: dict[str, asyncio.Lock] = {}
-        self._lifecycle_lock = asyncio.Lock()
-        self._cleanup_complete = asyncio.Event()
-        self._cleanup_complete.set()
-        self._active_requests_complete = asyncio.Event()
-        self._active_requests_complete.set()
-        self._active_request_count = 0
+        self._conversation_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._is_closed = False
         self._is_cleaning_up = False
         self._websockets_kwargs = websockets_kwargs
+
+    def _build_identifier(self) -> ComponentIdentifier:
+        """
+        Build the identifier with the caller-defined protocol identity.
+
+        Returns:
+            ComponentIdentifier: The identifier for this target instance.
+        """
+        return self._create_identifier(params={"protocol_identifier": self._protocol_identifier})
 
     async def _connect_async(self) -> ClientConnection:
         """
@@ -178,17 +189,13 @@ class WebsocketTarget(PromptTarget):
         Args:
             conversation_id (str): PyRIT conversation ID.
         """
-        await self._begin_request_async()
-        try:
-            conversation_lock = self._conversation_locks.setdefault(conversation_id, asyncio.Lock())
-            async with conversation_lock:
-                websocket = self._existing_conversation.pop(conversation_id, None)
-                if websocket is None:
-                    return
-                await websocket.close()
-                logger.info("Disconnected WebSocket conversation: %s", conversation_id)
-        finally:
-            self._end_request()
+        conversation_lock = self._conversation_locks.setdefault(conversation_id, asyncio.Lock())
+        async with conversation_lock:
+            websocket = self._existing_conversation.pop(conversation_id, None)
+            if websocket is None:
+                return
+            await websocket.close()
+            logger.info("Disconnected WebSocket conversation: %s", conversation_id)
 
     async def cleanup_target_async(self) -> None:
         """
@@ -196,14 +203,18 @@ class WebsocketTarget(PromptTarget):
 
         Raises:
             ConnectionError: If one or more connections cannot be closed.
+            RuntimeError: If another cleanup operation is already in progress.
         """
-        await self._begin_cleanup_async()
+        if self._is_cleaning_up:
+            raise RuntimeError("WebsocketTarget cleanup is already in progress.")
+
+        self._is_closed = True
+        self._is_cleaning_up = True
         try:
-            await self._active_requests_complete.wait()
             await self._close_all_connections_async()
         finally:
             self._conversation_locks.clear()
-            await self._finish_cleanup_async()
+            self._is_cleaning_up = False
 
     @limit_requests_per_minute
     @pyrit_target_retry
@@ -220,32 +231,29 @@ class WebsocketTarget(PromptTarget):
         Raises:
             ValueError: If the current message is not text.
         """
-        await self._begin_request_async()
-        try:
-            request = normalized_conversation[-1].message_pieces[0]
-            if request.converted_value_data_type != "text":
-                raise ValueError(f"Unsupported response type: {request.converted_value_data_type}")
+        self._raise_if_closed()
+        request = normalized_conversation[-1].message_pieces[0]
+        if request.converted_value_data_type != "text":
+            raise ValueError(f"Unsupported response type: {request.converted_value_data_type}")
 
-            conversation_id = request.conversation_id
-            if not conversation_id:
-                raise ValueError("WebsocketTarget requires a conversation_id on the message being sent.")
-            conversation_lock = self._conversation_locks.setdefault(conversation_id, asyncio.Lock())
+        conversation_id = request.conversation_id
+        if not conversation_id:
+            raise ValueError("WebsocketTarget requires a conversation_id on the message being sent.")
+        conversation_lock = self._conversation_locks.setdefault(conversation_id, asyncio.Lock())
 
-            async with conversation_lock:
-                try:
-                    await self._get_or_create_connection_async(
-                        conversation_id=conversation_id,
-                        conversation_history=normalized_conversation[:-1],
-                    )
-                    result = await self._send_text_async(
-                        text=request.converted_value,
-                        conversation_id=conversation_id,
-                    )
-                except BaseException:
-                    await self._discard_connection_async(conversation_id=conversation_id)
-                    raise
-        finally:
-            self._end_request()
+        async with conversation_lock:
+            try:
+                await self._get_or_create_connection_async(
+                    conversation_id=conversation_id,
+                    conversation_history=normalized_conversation[:-1],
+                )
+                result = await self._send_text_async(
+                    text=request.converted_value,
+                    conversation_id=conversation_id,
+                )
+            except BaseException:
+                await self._discard_connection_async(conversation_id=conversation_id)
+                raise
 
         response_piece = construct_response_from_request(
             request=request,
@@ -260,6 +268,7 @@ class WebsocketTarget(PromptTarget):
         conversation_id: str,
         conversation_history: list[Message],
     ) -> ClientConnection:
+        self._raise_if_closed()
         existing_connection = self._existing_conversation.get(conversation_id)
         if existing_connection is not None and existing_connection.state is State.OPEN:
             return existing_connection
@@ -284,6 +293,7 @@ class WebsocketTarget(PromptTarget):
                     conversation_history=conversation_history,
                     restore_callback=restore_callback,
                 )
+            self._raise_if_closed()
         except BaseException:
             try:
                 await websocket.close()
@@ -347,35 +357,9 @@ class WebsocketTarget(PromptTarget):
         except Exception as error:
             logger.warning("Failed to close unusable WebSocket conversation %s: %s", conversation_id, error)
 
-    async def _begin_request_async(self) -> None:
-        while True:
-            async with self._lifecycle_lock:
-                if not self._is_cleaning_up:
-                    self._active_request_count += 1
-                    self._active_requests_complete.clear()
-                    return
-                cleanup_complete = self._cleanup_complete
-            await cleanup_complete.wait()
-
-    def _end_request(self) -> None:
-        self._active_request_count -= 1
-        if self._active_request_count == 0:
-            self._active_requests_complete.set()
-
-    async def _begin_cleanup_async(self) -> None:
-        while True:
-            async with self._lifecycle_lock:
-                if not self._is_cleaning_up:
-                    self._is_cleaning_up = True
-                    self._cleanup_complete.clear()
-                    return
-                cleanup_complete = self._cleanup_complete
-            await cleanup_complete.wait()
-
-    async def _finish_cleanup_async(self) -> None:
-        async with self._lifecycle_lock:
-            self._is_cleaning_up = False
-            self._cleanup_complete.set()
+    def _raise_if_closed(self) -> None:
+        if self._is_closed:
+            raise RuntimeError("WebsocketTarget has been cleaned up and cannot send more prompts.")
 
     async def _close_all_connections_async(self) -> None:
         connections = list(self._existing_conversation.items())

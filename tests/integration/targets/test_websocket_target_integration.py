@@ -41,6 +41,7 @@ async def test_websocket_target_round_trip_with_local_pyrit_server(sqlite_instan
         port = server.sockets[0].getsockname()[1]
         target = WebsocketTarget(
             endpoint=f"ws://127.0.0.1:{port}",
+            protocol_identifier="local-pyrit-echo-v1",
             initialization_strings=[json.dumps({"type": "initialize", "client": "PyRIT"})],
             response_parser=response_parser,
             message_builder=message_builder,
@@ -124,6 +125,7 @@ async def test_websocket_target_restores_history_after_server_disconnect(sqlite_
         port = server.sockets[0].getsockname()[1]
         target = WebsocketTarget(
             endpoint=f"ws://127.0.0.1:{port}",
+            protocol_identifier="local-pyrit-echo-v1",
             initialization_strings=[json.dumps({"type": "initialize", "client": "PyRIT"})],
             response_parser=response_parser,
             message_builder=message_builder,
